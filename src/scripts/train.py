@@ -1,30 +1,48 @@
 import torch
+import gym
+from stable_baselines3 import PPO
+from src.envs.env import Env   # 你的自定义环境
 from src.utils.read_yaml import load_config
-from src.envs.env import Env
-from src.agent.agent1 import PPOAgent
+
 
 def train():
+    # 读取配置
     config = load_config("env_config.yaml")
-    device = torch.device(config.get("device", "cpu") if torch.cuda.is_available() else "cpu")
-    env = Env(batch_size=config["batch_size"], device=device)
-    obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.shape[0]
-    agent = PPOAgent(obs_dim, act_dim, lr=config["learning_rate"])
 
-    num_episodes = config["num_episodes"]
-    max_steps = config["max_steps"]
+    # 检查设备
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    for episode in range(num_episodes):
-        obs = env.reset()
-        episode_reward = 0
-        for step in range(max_steps):
-            action, log_prob, value = agent.select_action(obs)
-            next_obs, reward, done, info = env.step(action)
-            episode_reward += reward
-            obs = next_obs
-            if done:
-                break
-        print(f"Episode {episode}, Reward: {episode_reward}")
+    # 创建环境
+    env = Env(batch_size=config["batch_size"])
+
+    # 创建 PPO 模型
+    model = PPO(
+        policy=config["policy"],
+        env=env,
+        learning_rate=config["learning_rate"],
+        n_steps=config["n_steps"],
+        batch_size=config["batch_size"],
+        n_epochs=config["n_epochs"],
+        gamma=config["gamma"],
+        device=device
+    )
+
+    # 训练
+    model.learn(total_timesteps=config["total_timesteps"])
+
+    # 保存模型
+    model.save(config["train"]["save_path"])
+
+    # 加载模型（测试时）
+    #model = PPO.load(config["train"]["save_path"], env=env)
+
+    # 测试
+    obs = env.reset()
+    for _ in range(config["env"]["max_steps"]):
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, done, info = env.step(action)
+        if done:
+            obs = env.reset()
 
 if __name__ == "__main__":
     train()
