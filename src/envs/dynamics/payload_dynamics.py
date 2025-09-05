@@ -6,7 +6,7 @@ class PayloadDynamicsSimBatch:
     def __init__(self, config_path="env_config.yaml"):
         config = load_config(config_path)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.batch_size = config.get("batch_size", 1)
+        self.envs = config.get("envs", 1)
 
         
         
@@ -24,11 +24,11 @@ class PayloadDynamicsSimBatch:
         self.e3 = torch.tensor([0, 0, 1], dtype=torch.float32, device=self.device)
 
         # 初始化状态
-        self.state = torch.zeros(self.batch_size, 13, device=self.device)
+        self.state = torch.zeros(self.envs, 13, device=self.device)
         self.state[:, 6] = 1.0  # 单位四元数te[:,6] = 1.0  # 单位四元数
 
     def dynamics(self, state, input_force_torque):
-        B = self.batch_size
+        B = self.envs
         device = self.device
 
         p_l = state[:, 0:3]       # (B,3)

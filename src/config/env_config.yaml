@@ -1,6 +1,7 @@
 # 仿真参数
 num_episodes: 1000
 batch_size: 5
+envs: 5
 dt: 0.01
 learning_rate: 0.0003
 device: cuda
@@ -9,6 +10,8 @@ gamma: 0.99
 policy: "MlpPolicy"
 total_timesteps: 1000000  # 总训练步数
 n_steps: 2048             # 每个epoch的步数
+
+steps: 100 
 
 # 负载参数
 m_l: 1.0                  # 负载质量 (kg)
@@ -23,7 +26,7 @@ payload_initial_quaternion: [1.0, 0.0, 0.0, 0.0] # 初始四元数 [w,x,y,z]
 payload_initial_angular_velocity: [0.0, 0.0, 0.0] # 初始角速度 (rad/s)
 
 # 绳子参数
-di_list:                  # 绳子挂载点相对负载重心的位置
+di_list:                  
   - [0.5, 0, 0]
   - [-0.5, 0, 0]
   - [0, 0.5, 0]
@@ -32,8 +35,7 @@ rope_num: 4
 rope_length: 1.0          # 绳长 (m)
 
 # 绳子初始状态
-cable_initial_angles: [0.0, 1.57, 3.14, 4.71]     # 初始角度 (rad) - 四个方向均匀分布
-cable_initial_angular_velocities: [0.0, 0.0, 0.0, 0.0]  # 初始角速度 (rad/s)
+#cable_initial_angles: [0.0, 1.57, 3.14, 4.71]     # 初始角度 (rad) - 四个方向均匀分布
 cable_initial_tensions: [2.45, 2.45, 2.45, 2.45]        # 初始张力 (N) - 平衡负载重量
 
 # 四旋翼参数

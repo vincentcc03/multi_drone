@@ -1,11 +1,14 @@
 import torch
 
 def hat(v):
-    B = v.shape[0]
-    O = torch.zeros(B,3,3, dtype=v.dtype, device=v.device)
-    O[:,0,1] = -v[:,2]; O[:,0,2] = v[:,1]
-    O[:,1,0] = v[:,2];  O[:,1,2] = -v[:,0]
-    O[:,2,0] = -v[:,1]; O[:,2,1] = v[:,0]
+    # v: (..., 3)
+    O = torch.zeros(*v.shape[:-1], 3, 3, device=v.device, dtype=v.dtype)
+    O[..., 0, 1] = -v[..., 2]
+    O[..., 0, 2] =  v[..., 1]
+    O[..., 1, 0] =  v[..., 2]
+    O[..., 1, 2] = -v[..., 0]
+    O[..., 2, 0] = -v[..., 1]
+    O[..., 2, 1] =  v[..., 0]
     return O
 
 def Omega(w):
