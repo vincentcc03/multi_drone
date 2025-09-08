@@ -1,22 +1,12 @@
-# 仿真参数
-num_episodes: 1000
-batch_size: 5
 envs: 5
 dt: 0.01
-learning_rate: 0.0003
+steps: 1000
 device: cuda
-n_epochs: 10
-gamma: 0.99
-policy: "MlpPolicy"
-total_timesteps: 1000000  # 总训练步数
-n_steps: 2048             # 每个epoch的步数
-
-steps: 100 
 
 # 负载参数
 m_l: 1.0                  # 负载质量 (kg)
 J_l: 0.15                 # 负载转动惯量 (kg⋅m²)
-r_g: [0.1, 0, 0]         # 负载重心偏移
+r_g: [0, 0, 0]         # 负载重心偏移
 g: 9.81                   # 重力加速度
 
 # 负载初始状态

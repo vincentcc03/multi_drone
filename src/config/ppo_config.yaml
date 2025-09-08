@@ -1,0 +1,45 @@
+# ppo超参数
+num_episodes: 1000
+batch_size: 5
+learning_rate: 0.0003
+n_epochs: 10
+gamma: 0.99
+policy: "MlpPolicy"
+total_timesteps: 1000000  # 总训练步数
+n_steps: 2048             # 每个epoch的步数
+
+envs: 5
+dt: 0.01
+steps: 1000
+device: cuda
+
+
+params:
+  seed: 42
+  algo:
+    name: 'ppo'
+    learning_rate: 3e-4
+    gamma: 0.99
+    batch_size: 4096
+    minibatch_size: 512
+    epochs: 4
+    entropy_coef: 0.01
+    clip_range: 0.2
+    value_loss_coef: 2.0
+    max_grad_norm: 0.5
+    steps_num: 2048
+    save_best_after: 10000
+    save_frequency: 10000
+  network:
+    name: 'actor_critic'
+    separate: False
+    space: 'continuous'
+    mlp:
+      units: [256, 256]
+      activation: 'relu'
+  env:
+    name: 'drone_env'
+    num_envs: 1
+    # 你可以在这里传递自定义参数
+    # envs: 1
+    # 其他参数...
