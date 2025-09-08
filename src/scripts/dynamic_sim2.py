@@ -38,7 +38,6 @@ rope_dir_traj = []
 action = torch.zeros(B, n, 4, device=rope.device)  # [gamma(3), a]
 action[:, :, 3] = 1  # 初始张力加速度
 action[:, :, 0] = 1  # 初始角加速度
-action[:, :, 1] = 1  # 初始角加速度
 action[:, :, 2] = 0  # 初始角加速度
 
 # 2. 仿真循环

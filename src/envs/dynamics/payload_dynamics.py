@@ -3,8 +3,8 @@ from src.utils.read_yaml import load_config
 from src.utils.computer import hat, Omega, quat_to_rot
 
 class PayloadDynamicsSimBatch:
-    def __init__(self, config_path="env_config.yaml"):
-        config = load_config(config_path)
+    def __init__(self):
+        config = load_config("env_config.yaml")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.envs = config.get("envs", 1)
 

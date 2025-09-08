@@ -6,8 +6,8 @@ class CableDynamicsSimBatch:
     状态 per cable: [dir(3), omega(3), T, T_dot]
     输入 per cable: [gamma(3), a]
     """
-    def __init__(self, config_path="env_config.yaml"):
-        cfg = load_config(config_path)
+    def __init__(self):
+        cfg = load_config("env_config.yaml")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.envs = cfg.get("envs", 1)
 
