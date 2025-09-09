@@ -20,8 +20,8 @@ save_dir = os.path.join("results", "pictures", "dynamics", timestamp)
 os.makedirs(save_dir, exist_ok=True)
 
 # 1. 初始化
-rope = CableDynamicsSimBatch(config_path="env_config.yaml")
-payload = PayloadDynamicsSimBatch(config_path="env_config.yaml")
+rope = CableDynamicsSimBatch()
+payload = PayloadDynamicsSimBatch()
 cfg=load_config("env_config.yaml")
 L=cfg["rope_length"]  # 绳子长度
 steps = cfg["steps"]  # 仿真步数

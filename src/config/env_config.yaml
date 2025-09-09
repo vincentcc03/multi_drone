@@ -9,37 +9,22 @@ J_l: 0.15                 # 负载转动惯量 (kg⋅m²)
 r_g: [0, 0, 0]         # 负载重心偏移
 g: 9.81                   # 重力加速度
 
-# 负载初始状态
-payload_initial_position: [0.0, 0.0, 5.0]        # 初始位置 (m)
-payload_initial_velocity: [0.0, 0.0, 0.0]        # 初始速度 (m/s)
-payload_initial_quaternion: [1.0, 0.0, 0.0, 0.0] # 初始四元数 [w,x,y,z]
-payload_initial_angular_velocity: [0.0, 0.0, 0.0] # 初始角速度 (rad/s)
-
 # 绳子参数
-di_list:                  
-  - [0.5, 0, 0]
-  - [-0.5, 0, 0]
-  - [0, 0.5, 0]
-  - [0, -0.5, 0]
-rope_num: 4
+rope_num: 6
 rope_length: 1.0          # 绳长 (m)
+rl : 0.25                 # 绳子连接点圆的半径
 
 # 绳子初始状态
-#cable_initial_angles: [0.0, 1.57, 3.14, 4.71]     # 初始角度 (rad) - 四个方向均匀分布
-cable_initial_tensions: [2.45, 2.45, 2.45, 2.45]        # 初始张力 (N) - 平衡负载重量
+cable_initial_tensions: 2       # 初始张力 (N) - 平衡负载重量
 
-# 四旋翼参数
-quad_mass: 1.0            # 单个四旋翼质量 (kg)
-
+#无人机半径
+drone_radius: 0.125         # 无人机半径 (m)
 # 障碍物参数
 obstacle_pos:             # 障碍物位置 (只有x,y坐标，z假设为负载高度)
   - [1.5, 1.3]
   - [0.4, 2.9]
 obstacle_r: 0.5           # 障碍物半径 (m)
 
-# 轨迹参数
-trajectory_numbers: 2
-trajectory_length: 8
 
 # 安全约束参数
 d_min_quad: 1.0           # 四旋翼之间最小距离 (m)

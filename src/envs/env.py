@@ -1,7 +1,7 @@
 import gym
 import numpy as np
 import torch
-from src.utils.read_npy import load_trajectory_point
+from src.utils.load_traj import generate_complete_trajectory
 from src.envs.dynamics.payload_dynamics import PayloadDynamicsSimBatch
 from src.envs.dynamics.rope_dynamic import CableDynamicsSimBatch
 from src.utils.read_yaml import load_config
@@ -16,17 +16,27 @@ class Env(gym.Env):
         # 动力学仿真器
         self.payload = PayloadDynamicsSimBatch()
         self.cable = CableDynamicsSimBatch()
+        
+        # 参考轨迹
+        self.ref_traj = generate_complete_trajectory() #返回字典
+        # 从参考轨迹获取负载初始状态
+        self.payload_init_state = self.ref_traj['Ref_xl'][0]  
 
         # 绳子长度
         self.rope_length = self.config.get("rope_length", 1.0)
         self.g = self.config.get("g", 9.81)
+        self.n_cables = self.cable.n_cables
+        self.cable_init_state = self.cable.state.clone()
 
         # 障碍物信息
         self.obstacle_pos = torch.tensor(self.config.get("obstacle_pos"), dtype=torch.float32, device=self.device)
         self.obstacle_r = self.config.get("obstacle_r")
 
+        # 无人机半径
+        self.drone_radius = self.config.get("drone_radius", 0.125)
+        
+        
         # 终止条件
-        self.min_height = self.config.get("min_height", 0.5)
         self.max_tracking_error = self.config.get("max_tracking_error", 5.0)
         self.collision_tolerance = self.config.get("collision_tolerance", 0.1)
         self.trajectory_length = self.config.get("trajectory_length")
@@ -38,18 +48,17 @@ class Env(gym.Env):
         self.current_point_index = 0
         self.step_counter = 0
 
-        # 观测空间: rg(3) + 2*障碍物(x,y,r=6) + 下一点(3) = 12
-        self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(12,), dtype=np.float32)
+        # 观测空间: rg模长(0) + 2*障碍物(1-6) + ref_x(7-19) + ref_ul(20-37) + drone_radius(38)
+        self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(38,), dtype=np.float32)
         # 动作空间: 角加速度3 + 拉力加速度1 = 4
-        self.action_space = gym.spaces.Box(low=-10, high=10, shape=(4,), dtype=np.float32)
+        self.action_space = gym.spaces.Box(low=-10, high=10, shape=(4*self.n_cables,), dtype=np.float32)
 
     def reset(self):
         B = self.envs
         # 重置负载和绳子状态
-        self.payload.state = torch.zeros(B, 13, dtype=torch.float32, device=self.device)
-        self.payload.state[:, 6] = 1.0  # 单位四元数
+        self.payload.state = self.payload_init_state.unsqueeze(0).expand(B, 13).to(self.device)
         self.cable.state = torch.zeros(B, 1, 8, dtype=torch.float32, device=self.device)
-        self.cable.state[:, 0, 2] = 1.0  # 初始张力
+        self.cable.state[:, 0, 2] = self.cable_init_tension  # 初始张力
 
         self.current_point_index = 0
         self.step_counter = 0
@@ -124,7 +133,7 @@ class Env(gym.Env):
 
     def _get_obs(self):
         B = self.envs
-        r_g = self.payload.state[:, 0:3]  # (B,3)
+        r_g_mag = self.payload.r_g.norm(dim=1, keepdim=True)  # (B,1) 负载质心偏移向量的模长
         # 障碍物信息 (x, y, r) * 2
         obstacle_info = []
         for pos in self.obstacle_pos:
@@ -135,7 +144,8 @@ class Env(gym.Env):
             obstacle_info.append(obs_info)
         obstacle_info = torch.cat(obstacle_info, dim=1)  # (B, 6)
         # 下一时刻轨迹点 (3)
-        next_point = load_trajectory_point(self.current_point_index).unsqueeze(0).expand(B, 3)
+        
+        ref_pl = next_point['Ref_pl']  # (3, horizon+1)
         obs = torch.cat([r_g, obstacle_info, next_point], dim=1)
         return obs.cpu().numpy()
 
