@@ -1,5 +1,7 @@
 import torch
 from src.utils.read_yaml import load_config
+import numpy as np
+import math
 from src.utils.computer import hat
 class CableDynamicsSimBatch:
     """
@@ -11,20 +13,24 @@ class CableDynamicsSimBatch:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.envs = cfg.get("envs", 1)
 
-        # 挂点在负载坐标系下的位置 r_i (n,3)
-        di_list = cfg.get("di_list", [])
-        self.n_cables = len(di_list)
-        self.r_i = torch.tensor(di_list, dtype=torch.float32, device=self.device)
+        self.n_cables = cfg.get("rope_num")
+        rl = cfg.get("rl")  # 半径
+        alpha = 2 * np.pi / self.n_cables
+        r_i = []
+        for i in range(self.n_cables):
+            x = rl * math.cos(i * alpha)
+            y = rl * math.sin(i * alpha)
+            z = 0
+            r_i.append([x, y, z])
+        self.r_i = torch.tensor(r_i, dtype=torch.float32, device=self.device)  # (n, 3)
 
         # 初值
-        dir_init = cfg.get("cable_initial_dirs", [[0, 0, 1]] * self.n_cables)  # (n,3)
-        T_init = cfg.get("cable_initial_tensions", 1.0)
-
         # (B, n, 8): [dir(3), omega(3), T, T_dot]
         self.state = torch.zeros(self.envs, self.n_cables, 8, device=self.device)
+        dir_init = cfg.get("cable_initial_dirs", [[0, 0, 1]] * self.n_cables)  # (n,3)
         for i in range(self.n_cables):
+            self.state[:, i, 6] = cfg.get("cable_initial_tensions", 2)  # 初始张力 (N)
             self.state[:, i, 0:3] = torch.tensor(dir_init[i], device=self.device)
-            self.state[:, i, 6] = T_init if isinstance(T_init, (float, int)) else T_init[i]
 
         # 便捷成员变量
         self.dir = self.state[:, :, 0:3]      # (B, n, 3)
