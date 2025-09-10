@@ -10,8 +10,14 @@ class Env(gym.Env):
     def __init__(self):
         super().__init__()
         self.config = load_config("env_config.yaml")
+        self.traj_config = load_config("traj_config.yaml")
         self.device = torch.device(self.config.get("device", "cpu"))
         self.envs = self.config.get("envs", 1)
+        
+        # 轨迹点步进设置
+        self.current_point_index = 0
+        self.step_counter = 0
+        self.interval = self.traj_config["dt"]/self.config["dt"]
 
         # 动力学仿真器
         self.payload = PayloadDynamicsSimBatch()
@@ -22,9 +28,8 @@ class Env(gym.Env):
         # 从参考轨迹获取负载初始状态
         self.payload_init_state = self.ref_traj['Ref_xl'][0]  
 
-        # 绳子长度
+        # 绳子初始状态
         self.rope_length = self.config.get("rope_length", 1.0)
-        self.g = self.config.get("g", 9.81)
         self.n_cables = self.cable.n_cables
         self.cable_init_state = self.cable.state.clone()
 
@@ -32,24 +37,26 @@ class Env(gym.Env):
         self.obstacle_pos = torch.tensor(self.config.get("obstacle_pos"), dtype=torch.float32, device=self.device)
         self.obstacle_r = self.config.get("obstacle_r")
 
-        # 无人机半径
+        # 无人机状态
+        self.drone_pos = torch.zeros(self.envs, self.n_cables, 3, device=self.device)
         self.drone_radius = self.config.get("drone_radius", 0.125)
+        self.r_payload = self.config.get("r_payload", 0.25)
         
         
         # 终止条件
-        self.max_tracking_error = self.config.get("max_tracking_error", 5.0)
+        # self.max_tracking_error = self.config.get("max_tracking_error", 5.0)
         self.collision_tolerance = self.config.get("collision_tolerance", 0.1)
-        self.trajectory_length = self.config.get("trajectory_length")
+        self.drone_high_distance = self.config.get("drone_high_distance", 0.2)
+        self.t_max = self.config.get("t_max", 50.0)
 
-        # PPO相关参数
-        self.total_timesteps = self.config.get("total_timesteps", 1000000)
-        self.n_steps = self.config.get("n_steps", 2048)
-        self.points_per_epoch = max(1, self.trajectory_length // (self.total_timesteps // self.n_steps))
-        self.current_point_index = 0
-        self.step_counter = 0
-
+        # 奖励权重设置
+        self.pos_w = self.config.get("pos_w", 1.0)
+        self.vel_w = self.config.get("vel_w", 0.1)
+        self.quat_w = self.config.get("quat_w", 0.5)
+        self.omega_w = self.config.get("omega_w", 0.1)
+        
         # 观测空间: rg模长(0) + 2*障碍物(1-6) + ref_x(7-19) + ref_ul(20-37) + drone_radius(38)
-        self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(38,), dtype=np.float32)
+        self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(39,), dtype=np.float32)
         # 动作空间: 角加速度3 + 拉力加速度1 = 4
         self.action_space = gym.spaces.Box(low=-10, high=10, shape=(4*self.n_cables,), dtype=np.float32)
 
@@ -57,8 +64,7 @@ class Env(gym.Env):
         B = self.envs
         # 重置负载和绳子状态
         self.payload.state = self.payload_init_state.unsqueeze(0).expand(B, 13).to(self.device)
-        self.cable.state = torch.zeros(B, 1, 8, dtype=torch.float32, device=self.device)
-        self.cable.state[:, 0, 2] = self.cable_init_tension  # 初始张力
+        self.cable.state = self.cable_init_state
 
         self.current_point_index = 0
         self.step_counter = 0
@@ -66,75 +72,129 @@ class Env(gym.Env):
 
     def step(self, action):
         B = self.envs
-        action = torch.tensor(action, dtype=torch.float32, device=self.device).view(B, 4)
-        wd_dot = action[:, 0:3]
-        tension_ddot = action[:, 3]
+        N = self.n_cables
 
-        cable_action = torch.zeros(B, 1, 4, device=self.device)
-        cable_action[:, 0, 0:3] = wd_dot
-        cable_action[:, 0, 3] = tension_ddot
+        # 1. 处理动作 (B, N, 4)
+        action = torch.tensor(action, dtype=torch.float32, device=self.device).view(B, N, 4)
 
-        self.cable.rk4_step(cable_action)
+        # 2. 执行动作更新状态
+        self.cable.rk4_step(action)
         q_l = self.payload.state[:, 6:10]
         R_l = quat_to_rot(q_l)
         input_force_torque = self.cable.compute_force_torque(R_l)
         self.payload.rk4_step(input_force_torque)
+        
+        # 计算无人机位置
+        self.compute_drone_positions()
+        # 3. 计算奖励
+        reward, info_dict = self._compute_reward(action)
 
-        self.step_counter += 1
-        if self.step_counter % self.points_per_epoch == 0:
-            self.current_point_index = min(self.current_point_index + 1, self.trajectory_length - 1)
-
-        obs = self._get_obs()
-        reward, info = self._compute_reward(action)
+        # 4. 检查 done
         done = self._check_done()
-        # 并行返回
-        if not isinstance(done, np.ndarray):
-            done = np.array([done] * B)
-        if not isinstance(reward, np.ndarray):
-            reward = np.array([reward] * B)
-        if isinstance(info, dict):
-            info = [info for _ in range(B)]
+
+        # 5. 更新轨迹索引
+        self.step_counter += 1
+        if self.step_counter % self.interval == 0:
+            self.current_point_index += 1
+
+        # 6. 生成 obs（用新的 ref_{t+1}）
+        obs = self._get_obs()
+
+        info = []
         return obs, reward, done, info
+
 
     def _compute_reward(self, action):
         B = self.envs
-        current_pos = self.payload.state[:, 0:3]
-        target_pos = load_trajectory_point(self.current_point_index).unsqueeze(0).expand(B, 3)
-        tracking_error = torch.norm(current_pos - target_pos, dim=1)
-        reward = -tracking_error.cpu().numpy()
+        # 当前负载状态
+        state = self.payload.state  # (B, 13)
+        p_l = state[:, 0:3]         # (B, 3)
+        v_l = state[:, 3:6]         # (B, 3)
+        q_l = state[:, 6:10]        # (B, 4)
+        omega_l = state[:, 10:13]   # (B, 3)
+
+        # 参考状态
+        ref_xl = torch.tensor(self.ref_traj['Ref_xl'][self.current_point_index+1], 
+                            dtype=torch.float32, device=self.device).unsqueeze(0).expand(B, 13)
+        p_l_ref = ref_xl[:, 0:3]
+        v_l_ref = ref_xl[:, 3:6]
+        q_l_ref = ref_xl[:, 6:10]
+        omega_l_ref = ref_xl[:, 10:13]
+
+        # 位置误差
+        pos_error = torch.norm(p_l - p_l_ref, dim=1)
+        # 速度误差
+        vel_error = torch.norm(v_l - v_l_ref, dim=1)
+        # 姿态误差（四元数距离，常用1-内积绝对值）
+        quat_error = 1.0 - torch.abs(torch.sum(q_l * q_l_ref, dim=1))
+        # 角速度误差
+        omega_error = torch.norm(omega_l - omega_l_ref, dim=1)
+
+        # reward 设计（可加权）
+        reward = - (pos_error * self.pos_w + vel_error * self.vel_w + quat_error * self.quat_w + omega_error * self.omega_w)
+        # info
         info = []
         for i in range(B):
             info.append({
-                'tracking_error': tracking_error[i].item(),
+                'pos_error': pos_error[i].item(),
+                'vel_error': vel_error[i].item(),
+                'quat_error': quat_error[i].item(),
+                'omega_error': omega_error[i].item(),
                 'current_point_index': self.current_point_index,
-                'target_position': target_pos[i].cpu().numpy(),
-                'current_position': current_pos[i].cpu().numpy(),
+                'target_position': p_l_ref[i].cpu().numpy(),
+                'current_position': p_l[i].cpu().numpy(),
             })
-        return reward, info
+        return reward.cpu().numpy(), info
 
     def _check_done(self):
         B = self.envs
-        done = np.zeros(B, dtype=bool)
-        if self.step_counter >= self.total_timesteps:
-            done[:] = True
-            return done
-        current_pos = self.payload.state[:, 0:3]
-        done |= (current_pos[:, 2] < self.min_height).cpu().numpy()
-        target_pos = load_trajectory_point(self.current_point_index).unsqueeze(0).expand(B, 3)
-        tracking_error = torch.norm(current_pos - target_pos, dim=1)
-        done |= (tracking_error > self.max_tracking_error).cpu().numpy()
-        for obs_pos in self.obstacle_pos:
-            obs_pos_3d = torch.cat([obs_pos, current_pos[:, 2:3]], dim=0)
-            dist_to_obs = torch.norm(current_pos - obs_pos_3d.unsqueeze(0), dim=1)
-            done |= (dist_to_obs < self.obstacle_r + self.collision_tolerance).cpu().numpy()
-        if self.current_point_index >= self.trajectory_length - 1:
-            done[:] = True
-        return done
+        # 每个环境一个 done 标志
+        done = torch.zeros(B, dtype=torch.bool, device=self.device)
+        
+        # 3. 障碍物碰撞检测（假设 self.obstacle_pos 是 (N, 2)，平面上 N 个障碍物）
+        current_pos = self.payload.state[:, 0:3]   # (B, 3
+        if len(self.obstacle_pos) > 0:
+            obs_pos = self.obstacle_pos.to(self.device)        # (N, 2)
+            obs_pos = obs_pos.unsqueeze(0).expand(B, -1, -1)   # (B, N, 2)
+            # 负载与障碍物碰撞检测
+            payload_xy = current_pos[:, :2].unsqueeze(1)       # (B, 1, 2)
+            dist_to_obs = torch.norm(payload_xy - obs_pos, dim=2)  # (B, N)
+            min_dist, _ = torch.min(dist_to_obs, dim=1)            # (B,)
+            done |= (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance))
+            # 无人机与障碍物碰撞检测
+            drone_xy = self.drone_pos[:, :, :2].unsqueeze(2)   # (B, N_cables, 1, 2)
+            dist_to_obs = torch.norm(drone_xy - obs_pos, dim=3)  # (B, N_cables, N)
+            min_dist, _ = torch.min(dist_to_obs, dim=2)          # (B, N_cables)
+            done |= (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any(dim=1)
+            
+        # 无人机之间的碰撞检测
+            drone_xy = self.drone_pos[:, :, :2]  # (B, N_cables, 2)
+            drone_z = self.drone_pos[:, :, 2]    # (B, N_cables)
+            for i in range(self.n_cables):
+                for j in range(i+1, self.n_cables):
+                    # xy平面距离
+                    dist_xy = torch.norm(drone_xy[:, i, :] - drone_xy[:, j, :], dim=1)  # (B,)
+                    # z轴距离
+                    dist_z = torch.abs(drone_z[:, i] - drone_z[:, j])  # (B,)
+                    # xy距离和z距离都小于阈值才算碰撞
+                    collision = (dist_xy < (2*self.drone_radius + self.collision_tolerance)) & \
+                                (dist_z < self.drone_high_distance)
+                    done |= collision
+        # 绳子拉力终止条件
+        done |= (self.cable.T > self.t_max).any(dim=1)
 
+        return done.cpu().numpy()
+
+    
+# 观测空间: rg_mag(0) + 2*障碍物(1-6) + ref_x(7-19) + ref_ul(20-37) + drone_radius(38)
     def _get_obs(self):
         B = self.envs
-        r_g_mag = self.payload.r_g.norm(dim=1, keepdim=True)  # (B,1) 负载质心偏移向量的模长
-        # 障碍物信息 (x, y, r) * 2
+
+        # 1. rg_mag (B, 1)
+        r_g_mag = self.payload.r_g.norm().item()
+        r_g_mag = torch.full((B, 1), r_g_mag, device=self.device)  # (B, 1)
+
+        # 2. 障碍物信息 (B, 6)
         obstacle_info = []
         for pos in self.obstacle_pos:
             obs_info = torch.cat([
@@ -143,11 +203,44 @@ class Env(gym.Env):
             ]).unsqueeze(0).expand(B, 3)
             obstacle_info.append(obs_info)
         obstacle_info = torch.cat(obstacle_info, dim=1)  # (B, 6)
-        # 下一时刻轨迹点 (3)
-        
-        ref_pl = next_point['Ref_pl']  # (3, horizon+1)
-        obs = torch.cat([r_g, obstacle_info, next_point], dim=1)
+
+        # 3. ref_xl (B, 13) 和 ref_ul (B, 18)
+        ref_xl = torch.tensor(self.ref_traj['Ref_xl'][self.current_point_index+1], dtype=torch.float32, device=self.device)
+        ref_ul = torch.tensor(self.ref_traj['Ref_ul'][self.current_point_index], dtype=torch.float32, device=self.device)
+        ref_xl = ref_xl.unsqueeze(0).expand(B, -1)
+        ref_ul = ref_ul.unsqueeze(0).expand(B, -1)
+        # 4. drone_radius (B, 1)
+        drone_radius = torch.full((B, 1), float(self.drone_radius), device=self.device)
+
+        # 拼接
+        obs = torch.cat([r_g_mag, obstacle_info, ref_xl, ref_ul, drone_radius], dim=1)  # (B, 1+6+13+18+1=39)
         return obs.cpu().numpy()
 
     def render(self, mode="human"):
         pass
+    
+    def compute_drone_positions(self):
+        """
+        计算所有无人机在世界坐标系下的位置，返回 (B, N_cables, 3)
+        """
+        B = self.envs
+        N = self.n_cables
+        # 负载位置 (B, 3)
+        p_load = self.payload.state[:, 0:3]  # (B, 3)
+        # 负载姿态 (B, 4) -> (B, 3, 3)
+        q_load = self.payload.state[:, 6:10]
+        R_l = quat_to_rot(q_load)  # (B, 3, 3)
+        # 绳子挂载点 (N, 3)
+        r_i = self.cable.r_i  # (N, 3)
+        # 绳子方向 (B, N, 3) 世界系下
+        d_i = self.cable.dir  # (B, N, 3)
+        # 绳子长度
+        L = self.rope_length
+
+        # 将绳子方向变换到负载坐标系下
+        d_i_local = torch.einsum('bij,bnj->bni', R_l.transpose(1,2), d_i)  # (B, N, 3)
+        # 负载系下无人机位置
+        p_drone_load = r_i.unsqueeze(0) + d_i_local * L  # (B, N, 3)
+        # 变换到世界系
+        p_drone_world = torch.einsum('bij,bnj->bni', R_l, p_drone_load) + p_load.unsqueeze(1)  # (B, N, 3)
+        self.drone_pos = p_drone_world
