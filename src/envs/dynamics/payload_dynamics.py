@@ -16,8 +16,8 @@ class PayloadDynamicsSimBatch:
         self.J_l = torch.eye(3, device=self.device) * J_l_value
         self.j_inv = torch.linalg.inv(self.J_l)
         
-        r_g_list = config.get("r_g", [0.1, 0, 0])
-        self.r_g = torch.tensor(r_g_list, dtype=torch.float32, device=self.device)
+        r_g = config.get("r_g", [0.1, 0, 0])
+        self.r_g = torch.tensor(r_g, dtype=torch.float32, device=self.device)
         
         self.g = config.get("g", 9.81)
         self.dt = config.get("dt", 0.01)
