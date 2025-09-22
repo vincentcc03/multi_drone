@@ -1,99 +1,94 @@
-import os
-import yaml
 import torch
-import numpy as np
-from rl_games.algos_torch import torch_ext
 from rl_games.common import env_configurations, vecenv
 from rl_games.torch_runner import Runner
-import gym
 
-# 导入您的环境
-from src.envs.env import Env  # 请替换为您实际的导入路径
+from src.envs.env import RLGamesEnv# 替换为你实际文件路径
+from src.envs.RLGamesEnvWrapper import RLGamesEnvWrapper
 
-class RLGamesEnvWrapper(gym.Env):
-    """
-    将您的环境包装成 rl_games 需要的格式
-    """
-    def __init__(self, **kwargs):
-        self.env = Env()
-        self.num_envs = self.env.envs
-        
-    def step(self, actions):
-        # actions 形状: (num_envs * action_dim,) 需要重塑为 (num_envs, action_dim)
-        actions = actions.reshape(self.num_envs, -1)
-        obs, rewards, dones, infos = self.env.step(actions)
-        
-        # rl_games 期望的格式
-        return obs, rewards, dones, infos
-    
-    def reset(self):
-        obs = self.env.reset()
-        return obs
-    
-    def get_number_of_agents(self):
-        return self.num_envs
-    
-    def get_env_info(self):
-        info = {}
-        info['action_space'] = self.env.action_space
-        info['observation_space'] = self.env.observation_space
-        info['agents'] = self.num_envs
-        info['value_size'] = 1
-        return info
+# -------------------------------
+# 1️⃣ 环境构造函数
+# -------------------------------
+def create_env(config_name=None, num_envs=1, **kwargs):
+    # 使用传入的并行数 num_envs（来自 params['config']['num_actors']）
+    env = RLGamesEnv(
+        config_name="env_config.yaml",
+        traj_name="traj_config.yaml",
+        num_envs=num_envs,
+        device="cuda:0" if torch.cuda.is_available() else "cpu"
+    )
+    return RLGamesEnvWrapper(env)
 
-def create_env(**kwargs):
-    """环境创建函数"""
-    return RLGamesEnvWrapper(**kwargs)
+# -------------------------------
+# 2️⃣ 注册 vecenv
+# -------------------------------
+vecenv.register(
+    "RLGPUEnv",                  # vecenv 类型名
+    lambda config_name, num_actors, **kwargs: create_env(**kwargs)
+)
 
-# 注册环境到 rl_games
-vecenv.register('PayloadEnv', lambda **kwargs: create_env(**kwargs))
-env_configurations.register('PayloadEnv', {
-    'env_creator': create_env,
-    'vecenv_type': 'gym',  # 改为 'gym'
-    'env_kwargs': {},
-})
+# -------------------------------
+# 3️⃣ 注册环境到 rl-games 配置
+# -------------------------------
+env_configurations.register(
+    "custom_rlgpu",
+    {
+        "vecenv_type": "RLGPUEnv",
+        "env_creator": lambda **kwargs: create_env(**kwargs)
+    }
+)
 
-def train():
-    """训练函数"""
-    print("初始化训练...")
-    
-    # 设置设备
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"使用设备: {device}")
-    
-    # 创建训练器
-    runner = Runner()
-    with open('src/config/ppo_config.yaml', 'r', encoding='utf-8') as f:
-        yaml_conf = yaml.safe_load(f)
-    runner.load(yaml_conf)
-    runner.reset()
-    
-    print("开始训练 Payload PPO...")
-    
-    # 开始训练
-    runner.run({
-        'train': True,
-        'play': False,
-        'checkpoint': '',
-        'sigma': None
-    })
+# -------------------------------
+# 4️⃣ PPO/A2C 超参数（添加 algo）
+# -------------------------------
+params = {
+    "algo": {
+        "name": "a2c_continuous"
+    },
+    "config": {
+        "name": "drone_transport_exp",
+        "env_name": "custom_rlgpu",
+        "num_actors": 16,
+        "horizon_length": 128,
+        "minibatch_size": 256,
+        "learning_rate": 3e-4,
+        "max_epochs": 1000,
+        "entropy_beta": 0.01,
+        "clip_ratio": 0.2,
+        "gamma": 0.99,
+        "reward_shaper": {},
+        "env_config": {},
+        "lr_schedule": "fixed",
+        "e_clip": 0.2,
+        "clip_value": 0.2,
+        "value_loss_coef": 0.5,
+        "max_grad_norm": 0.5,
+        "grad_norm": 0.5,
+        "normalize_advantage": False,
+        "use_gae": True,
+        "gae_lambda": 0.95,
+        "value_bootstrap": True,
+        "entropy_regularization": 0.0,
+        "normalize_input": False,
+        "critic_coef": 0.5,
+        # 新增 tau（默认 1.0）
+        "tau": 1.0
+    },
+    "network": {
+        "name": "actor_critic",
+        "hidden_units": [256, 256],
+        "activation": "relu"
+    },
+    "model": {
+        "name": "continuous_a2c",
+        "actor_units": [256, 256],
+        "critic_units": [256, 256]
+    }
+}
 
-
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Payload Environment PPO Training')
-    parser.add_argument('--mode', type=str, choices=['train', 'test', 'resume'], 
-                       default='train', help='运行模式')
-    parser.add_argument('--checkpoint', type=str, default='', 
-                       help='检查点路径 (用于test或resume模式)')
-    parser.add_argument('--config', type=str, default='payload_ppo_config.yaml',
-                       help='配置文件路径')
-    
-    args = parser.parse_args()
-    
-    # 确保必要的目录存在
-    os.makedirs('runs', exist_ok=True)
-    os.makedirs('logs', exist_ok=True)
-    
-    train()
+# -------------------------------
+# 5️⃣ 创建 Runner 并训练
+# -------------------------------
+# 推荐用 load + run 的调用方式，run 需要一个 args 字典（至少包含 'train'）
+runner = Runner()
+runner.load({'params': params})
+runner.run({'train': True, 'play': False})

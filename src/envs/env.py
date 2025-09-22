@@ -1,31 +1,25 @@
-import gym
-import numpy as np
 import torch
+import numpy as np
+from rl_games.common import env_configurations
 from src.utils.load_traj import generate_complete_trajectory
 from src.envs.dynamics.payload_dynamics import PayloadDynamicsSimBatch
 from src.envs.dynamics.rope_dynamic import CableDynamicsSimBatch
 from src.utils.read_yaml import load_config
 from src.utils.computer import quat_to_rot
-class Env(gym.Env):
-    def __init__(self):
-        super().__init__()
-        self.config = load_config("env_config.yaml")
-        self.traj_config = load_config("traj_config.yaml")
-        self.device = torch.device(self.config.get("device", "cpu"))
-        self.envs = self.config.get("envs", 1)
-        
-        # 轨迹点步进设置
-        self.current_point_index = 0
-        self.step_counter = 0
-        self.interval = self.traj_config["dt"]/self.config["dt"]
 
+class RLGamesEnv:
+    def __init__(self, config_name, traj_name, num_envs=1, device="cpu"):
+        self.config = load_config(config_name)
+        self.traj_config = load_config(traj_name)
+        self.device = torch.device(self.config.get("device", device))
+        self.num_envs = num_envs
+        
         # 动力学仿真器
         self.payload = PayloadDynamicsSimBatch()
         self.cable = CableDynamicsSimBatch()
-        
+
         # 参考轨迹
-        self.ref_traj = generate_complete_trajectory() #返回字典
-        # 从参考轨迹获取负载初始状态
+        self.ref_traj = generate_complete_trajectory()
         self.payload_init_state = self.ref_traj['Ref_xl'][0]  
 
         # 绳子初始状态
@@ -33,75 +27,77 @@ class Env(gym.Env):
         self.n_cables = self.cable.n_cables
         self.cable_init_state = self.cable.state.clone()
 
-        # 障碍物信息
+        # 无人机 / 障碍物参数
         self.obstacle_pos = torch.tensor(self.config.get("obstacle_pos"), dtype=torch.float32, device=self.device)
         self.obstacle_r = self.config.get("obstacle_r")
-
-        # 无人机状态
-        self.drone_pos = torch.zeros(self.envs, self.n_cables, 3, device=self.device)
         self.drone_radius = self.config.get("drone_radius", 0.125)
         self.r_payload = self.config.get("r_payload", 0.25)
-        
-        
-        # 终止条件
-        # self.max_tracking_error = self.config.get("max_tracking_error", 5.0)
-        self.collision_tolerance = self.config.get("collision_tolerance", 0.1)
-        self.drone_high_distance = self.config.get("drone_high_distance", 0.2)
-        self.t_max = self.config.get("t_max", 50.0)
 
-        # 奖励权重设置
-        self.pos_w = self.config.get("pos_w", 1.0)
-        self.vel_w = self.config.get("vel_w", 0.1)
-        self.quat_w = self.config.get("quat_w", 0.5)
-        self.omega_w = self.config.get("omega_w", 0.1)
-        
-        # 观测空间: rg模长(0) + 2*障碍物(1-6) + ref_x(7-19) + ref_ul(20-37) + drone_radius(38)
-        self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(39,), dtype=np.float32)
-        # 动作空间: 角加速度3 + 拉力加速度1 = 4
-        self.action_space = gym.spaces.Box(low=-10, high=10, shape=(4*self.n_cables,), dtype=np.float32)
+        # episode 计数
+        self.current_point_index = 0
+        self.step_counter = 0
+        self.interval = self.traj_config["dt"]/self.config["dt"]
+
+        # obs / act 空间
+        self.obs_dim = 39
+        self.act_dim = 4 * self.n_cables
+
+    # ============= rl-games 要求的方法 =============
 
     def reset(self):
-        B = self.envs
-        # 重置负载和绳子状态
+        """批量 reset 所有环境"""
+        B = self.num_envs
         self.payload.state = self.payload_init_state.unsqueeze(0).expand(B, 13).to(self.device)
-        self.cable.state = self.cable_init_state
+        self.cable.state = self.cable_init_state.to(self.device)
 
         self.current_point_index = 0
         self.step_counter = 0
-        return self._get_obs()
+        obs = self._get_obs()
+        return obs
 
     def step(self, action):
-        B = self.envs
+        """
+        action: torch.Tensor [B, act_dim]
+        return: obs, reward, done, info
+        """
+        B = self.num_envs
         N = self.n_cables
+        action = action.view(B, N, 4).to(self.device)
 
-        # 1. 处理动作 (B, N, 4)
-        action = torch.tensor(action, dtype=torch.float32, device=self.device).view(B, N, 4)
-
-        # 2. 执行动作更新状态
+        # 动力学仿真
         self.cable.rk4_step(action)
         q_l = self.payload.state[:, 6:10]
         R_l = quat_to_rot(q_l)
         input_force_torque = self.cable.compute_force_torque(R_l)
         self.payload.rk4_step(input_force_torque)
-        
+
         # 计算无人机位置
         self.compute_drone_positions()
-        # 3. 计算奖励
-        reward, info_dict = self._compute_reward(action)
 
-        # 4. 检查 done
+        # 奖励 + done
+        reward, info = self._compute_reward(action)
         done = self._check_done()
 
-        # 5. 更新轨迹索引
+        # 更新轨迹
         self.step_counter += 1
         if self.step_counter % self.interval == 0:
             self.current_point_index += 1
 
-        # 6. 生成 obs（用新的 ref_{t+1}）
         obs = self._get_obs()
-
-        info = []
         return obs, reward, done, info
+
+    def get_number_of_agents(self):
+        """rl-games 要求：返回 agent 数量"""
+        return 1
+
+    def get_env_info(self):
+        return {
+            "obs_dim": self.obs_dim,
+            "act_dim": self.act_dim,
+            "agents": 1
+        }
+
+
 
 
     def _compute_reward(self, action):
