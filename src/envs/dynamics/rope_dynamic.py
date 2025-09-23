@@ -64,6 +64,7 @@ class CableDynamicsSimBatch:
         return xdot
 
     def rk4_step(self, action):
+        print(f"rk4_step: action.shape={getattr(action, 'shape', None)}, state.shape={self.state.shape}")
         dt = self.dt
         s = self.state
 

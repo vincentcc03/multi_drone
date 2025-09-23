@@ -8,7 +8,7 @@ from src.utils.read_yaml import load_config
 from src.utils.computer import quat_to_rot
 
 class RLGamesEnv:
-    def __init__(self, config_name, traj_name, num_envs=1, device="cpu"):
+    def __init__(self, config_name, traj_name, num_envs=1, device="cuda"):
         self.config = load_config(config_name)
         self.traj_config = load_config(traj_name)
         self.device = torch.device(self.config.get("device", device))
@@ -20,7 +20,7 @@ class RLGamesEnv:
 
         # 参考轨迹
         self.ref_traj = generate_complete_trajectory()
-        self.payload_init_state = self.ref_traj['Ref_xl'][0]  
+        self.payload_init_state = torch.from_numpy(self.ref_traj['Ref_xl'][0]).float()
 
         # 绳子初始状态
         self.rope_length = self.config.get("rope_length", 1.0)
@@ -28,10 +28,21 @@ class RLGamesEnv:
         self.cable_init_state = self.cable.state.clone()
 
         # 无人机 / 障碍物参数
-        self.obstacle_pos = torch.tensor(self.config.get("obstacle_pos"), dtype=torch.float32, device=self.device)
-        self.obstacle_r = self.config.get("obstacle_r")
+        self.obstacle_pos = torch.tensor(self.config.get("obstacle_pos", []), dtype=torch.float32, device=self.device)
+        self.obstacle_r = self.config.get("obstacle_r", 0.1)
         self.drone_radius = self.config.get("drone_radius", 0.125)
         self.r_payload = self.config.get("r_payload", 0.25)
+        
+        # 奖励权重
+        self.pos_w = self.config.get("pos_weight", 1.0)
+        self.vel_w = self.config.get("vel_weight", 0.1)
+        self.quat_w = self.config.get("quat_weight", 0.1)
+        self.omega_w = self.config.get("omega_weight", 0.01)
+        
+        # 终止条件参数
+        self.collision_tolerance = self.config.get("collision_tolerance", 0.05)
+        self.drone_high_distance = self.config.get("drone_high_distance", 0.5)
+        self.t_max = self.config.get("t_max", 100.0)
 
         # episode 计数
         self.current_point_index = 0
@@ -41,6 +52,9 @@ class RLGamesEnv:
         # obs / act 空间
         self.obs_dim = 39
         self.act_dim = 4 * self.n_cables
+        
+        # 无人机位置
+        self.drone_pos = torch.zeros(self.num_envs, self.n_cables, 3, device=self.device)
 
     # ============= rl-games 要求的方法 =============
 
@@ -62,7 +76,8 @@ class RLGamesEnv:
         """
         B = self.num_envs
         N = self.n_cables
-        action = action.view(B, N, 4).to(self.device)
+        action = torch.as_tensor(action, dtype=torch.float32, device=self.device)
+        action = action.view(B, N, 4)
 
         # 动力学仿真
         self.cable.rk4_step(action)
@@ -97,11 +112,8 @@ class RLGamesEnv:
             "agents": 1
         }
 
-
-
-
     def _compute_reward(self, action):
-        B = self.envs
+        B = self.num_envs
         # 当前负载状态
         state = self.payload.state  # (B, 13)
         p_l = state[:, 0:3]         # (B, 3)
@@ -110,7 +122,8 @@ class RLGamesEnv:
         omega_l = state[:, 10:13]   # (B, 3)
 
         # 参考状态
-        ref_xl = torch.tensor(self.ref_traj['Ref_xl'][self.current_point_index+1], 
+        next_idx = min(self.current_point_index + 1, len(self.ref_traj['Ref_xl']) - 1)
+        ref_xl = torch.tensor(self.ref_traj['Ref_xl'][next_idx], 
                             dtype=torch.float32, device=self.device).unsqueeze(0).expand(B, 13)
         p_l_ref = ref_xl[:, 0:3]
         v_l_ref = ref_xl[:, 3:6]
@@ -128,6 +141,7 @@ class RLGamesEnv:
 
         # reward 设计（可加权）
         reward = - (pos_error * self.pos_w + vel_error * self.vel_w + quat_error * self.quat_w + omega_error * self.omega_w)
+        
         # info
         info = []
         for i in range(B):
@@ -137,80 +151,82 @@ class RLGamesEnv:
                 'quat_error': quat_error[i].item(),
                 'omega_error': omega_error[i].item(),
                 'current_point_index': self.current_point_index,
-                'target_position': p_l_ref[i].cpu().numpy(),
-                'current_position': p_l[i].cpu().numpy(),
+                'target_position': p_l_ref[i],
+                'current_position': p_l[i],
             })
-        return reward.cpu().numpy(), info
+        return reward, info
 
     def _check_done(self):
-        B = self.envs
+        B = self.num_envs
         # 每个环境一个 done 标志
         done = torch.zeros(B, dtype=torch.bool, device=self.device)
-        
+
         # 3. 障碍物碰撞检测（假设 self.obstacle_pos 是 (N, 2)，平面上 N 个障碍物）
-        current_pos = self.payload.state[:, 0:3]   # (B, 3
+        current_pos = self.payload.state[:, 0:3]   # (B, 3)
+
         if len(self.obstacle_pos) > 0:
             obs_pos = self.obstacle_pos.to(self.device)        # (N, 2)
             obs_pos = obs_pos.unsqueeze(0).expand(B, -1, -1)   # (B, N, 2)
+
             # 负载与障碍物碰撞检测
             payload_xy = current_pos[:, :2].unsqueeze(1)       # (B, 1, 2)
             dist_to_obs = torch.norm(payload_xy - obs_pos, dim=2)  # (B, N)
             min_dist, _ = torch.min(dist_to_obs, dim=1)            # (B,)
             done |= (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance))
-            # 无人机与障碍物碰撞检测
-            drone_xy = self.drone_pos[:, :, :2].unsqueeze(2)   # (B, N_cables, 1, 2)
-            dist_to_obs = torch.norm(drone_xy - obs_pos, dim=3)  # (B, N_cables, N)
-            min_dist, _ = torch.min(dist_to_obs, dim=2)          # (B, N_cables)
-            done |= (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any(dim=1)
-            
-        # 无人机之间的碰撞检测
-            drone_xy = self.drone_pos[:, :, :2]  # (B, N_cables, 2)
-            drone_z = self.drone_pos[:, :, 2]    # (B, N_cables)
-            for i in range(self.n_cables):
-                for j in range(i+1, self.n_cables):
-                    # xy平面距离
-                    dist_xy = torch.norm(drone_xy[:, i, :] - drone_xy[:, j, :], dim=1)  # (B,)
-                    # z轴距离
-                    dist_z = torch.abs(drone_z[:, i] - drone_z[:, j])  # (B,)
-                    # xy距离和z距离都小于阈值才算碰撞
-                    collision = (dist_xy < (2*self.drone_radius + self.collision_tolerance)) & \
-                                (dist_z < self.drone_high_distance)
-                    done |= collision
+
+            # # 无人机与障碍物碰撞检测
+            # drone_xy = self.drone_pos[:, :, :2].unsqueeze(2)   # (B, N_cables, 1, 2)
+            # dist_to_obs = torch.norm(drone_xy - obs_pos, dim=3)  # (B, N_cables, N)
+            # min_dist, _ = torch.min(dist_to_obs, dim=2)          # (B, N_cables)
+            # done |= (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any(dim=1)
+
+            # # 无人机之间的碰撞检测
+            # drone_xy = self.drone_pos[:, :, :2]  # (B, N_cables, 2)
+            # drone_z = self.drone_pos[:, :, 2]    # (B, N_cables)
+            # for i in range(self.n_cables):
+            #     for j in range(i+1, self.n_cables):
+            #         # xy平面距离
+            #         dist_xy = torch.norm(drone_xy[:, i, :] - drone_xy[:, j, :], dim=1)  # (B,)
+            #         # z轴距离
+            #         dist_z = torch.abs(drone_z[:, i] - drone_z[:, j])  # (B,)
+            #         # xy距离和z距离都小于阈值才算碰撞
+            #         collision = (dist_xy < (2*self.drone_radius + self.collision_tolerance)) & \
+            #                     (dist_z < self.drone_high_distance)
+            #         done |= collision
+
         # 绳子拉力终止条件
         done |= (self.cable.T > self.t_max).any(dim=1)
 
-        return done.cpu().numpy()
-
-    
-# 观测空间: rg_mag(0) + 2*障碍物(1-6) + ref_x(7-19) + ref_ul(20-37) + drone_radius(38)
+        return done
     def _get_obs(self):
-        B = self.envs
+        B = self.num_envs
 
         # 1. rg_mag (B, 1)
         r_g_mag = self.payload.r_g.norm().item()
         r_g_mag = torch.full((B, 1), r_g_mag, device=self.device)  # (B, 1)
 
-        # 2. 障碍物信息 (B, 6)
-        obstacle_info = []
-        for pos in self.obstacle_pos:
-            obs_info = torch.cat([
-                pos,
-                torch.tensor([self.obstacle_r], device=self.device)
+        # 2. 障碍物信息 (B, 6) - 假设最多2个障碍物
+        obstacle_info = torch.zeros(B, 6, device=self.device)
+        for i, pos in enumerate(self.obstacle_pos[:2]):  # 最多取前2个
+            obstacle_info[:, i*3:(i+1)*3] = torch.cat([
+                pos, torch.tensor([self.obstacle_r], device=self.device)
             ]).unsqueeze(0).expand(B, 3)
-            obstacle_info.append(obs_info)
-        obstacle_info = torch.cat(obstacle_info, dim=1)  # (B, 6)
 
         # 3. ref_xl (B, 13) 和 ref_ul (B, 18)
-        ref_xl = torch.tensor(self.ref_traj['Ref_xl'][self.current_point_index+1], dtype=torch.float32, device=self.device)
-        ref_ul = torch.tensor(self.ref_traj['Ref_ul'][self.current_point_index], dtype=torch.float32, device=self.device)
+        next_idx = min(self.current_point_index + 1, len(self.ref_traj['Ref_xl']) - 1)
+        curr_idx = min(self.current_point_index, len(self.ref_traj['Ref_ul']) - 1)
+        
+        ref_xl = torch.tensor(self.ref_traj['Ref_xl'][next_idx], dtype=torch.float32, device=self.device)
+        ref_ul = torch.tensor(self.ref_traj['Ref_ul'][curr_idx], dtype=torch.float32, device=self.device)
         ref_xl = ref_xl.unsqueeze(0).expand(B, -1)
         ref_ul = ref_ul.unsqueeze(0).expand(B, -1)
+        
         # 4. drone_radius (B, 1)
         drone_radius = torch.full((B, 1), float(self.drone_radius), device=self.device)
 
         # 拼接
         obs = torch.cat([r_g_mag, obstacle_info, ref_xl, ref_ul, drone_radius], dim=1)  # (B, 1+6+13+18+1=39)
-        return obs.cpu().numpy()
+        return obs
 
     def render(self, mode="human"):
         pass
@@ -219,7 +235,7 @@ class RLGamesEnv:
         """
         计算所有无人机在世界坐标系下的位置，返回 (B, N_cables, 3)
         """
-        B = self.envs
+        B = self.num_envs
         N = self.n_cables
         # 负载位置 (B, 3)
         p_load = self.payload.state[:, 0:3]  # (B, 3)
