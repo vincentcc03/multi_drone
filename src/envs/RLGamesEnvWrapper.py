@@ -14,8 +14,6 @@ class RLGamesEnvWrapper(IVecEnv):
     def __init__(self, env: RLGamesEnv):
         super().__init__()
         self.env = env 
-        self.num_envs = env.num_envs
-        self.device = env.device
 
     def reset(self):
         obs = self.env.reset()
