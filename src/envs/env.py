@@ -18,8 +18,15 @@ class RLGamesEnv:
         self.device = torch.device(self.config.get("device", device))
         self.num_envs = num_envs
         self.dt = self.config.get("dt")
+        self.done = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         
-        
+        # 轨迹记录
+        self.trajectory_records = []  # 每个环境的轨迹记录列表
+        for _ in range(self.num_envs):
+            self.trajectory_records.append([])  # 为每个环境创建空列表
+        self.record_interval = self.config.get("trajectory_record_interval", 10)  # 每10步记录一次
+        self.record_step_counters = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+            
         # 动力学仿真器
         self.payload = PayloadDynamicsSimBatch()
         self.cable = CableDynamicsSimBatch()
@@ -58,9 +65,10 @@ class RLGamesEnv:
         self.t_max = self.config.get("t_max", 100.0)
 
         # episode 计数
-        self.current_point_index = 0
-        self.step_counter = 0
+        self.current_point_indices = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.step_counters = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.interval = self.traj_config["dt"]/self.config["dt"]
+        
 
         # obs / act 空间
         self.obs_dim = 39
@@ -68,17 +76,27 @@ class RLGamesEnv:
         
         # 无人机位置
         self.drone_pos = torch.zeros(self.num_envs, self.n_cables, 3, device=self.device)
-
+        self.reset()
     # ============= rl-games 要求的方法 =============
 
     def reset(self):
         """批量 reset 所有环境"""
         B = self.num_envs
-        self.payload.state = self.payload_init_state.unsqueeze(0).expand(B, 13).to(self.device)
-        self.cable.state = self.cable_init_state.to(self.device)
-
-        self.current_point_index = 0
-        self.step_counter = 0
+        
+        # 找出需要重置的环境（done为True的环境）
+        reset_mask = self.done  # (B,) boolean tensor
+        
+        if reset_mask.any():
+            # 重置负载状态 - 只重置done的环境
+            reset_payload_state = self.payload_init_state.unsqueeze(0).expand(reset_mask.sum(), 13).to(self.device)
+            self.payload.state[reset_mask] = reset_payload_state
+            self.cable.state[reset_mask] = self.cable_init_state.to(self.device)
+            # 重置计数器
+            self.current_point_indices[reset_mask] = 0
+            self.step_counters[reset_mask] = 0
+            
+            self.done[reset_mask] = False
+        
         obs = self._get_obs()
         return obs
 
@@ -102,33 +120,41 @@ class RLGamesEnv:
 
         # 计算无人机位置
         self.compute_drone_positions()
+        
+        
 
         # 奖励 + done
         reward, info = self._compute_reward(action)
-        done = self._check_done()
+        self.done = self._check_done()
+        self.reset()
 
         # 更新轨迹
-        self.step_counter += 1
+        self.step_counters += 1
         
-        if self.step_counter % self.interval == 0:
-            self.current_point_index += 1
-            
+        # 检查哪些环境需要更新轨迹点
+        update_mask = (self.step_counters % int(self.interval) == 0)
+        self.current_point_indices[update_mask] += 1
+        
+       
+
         # 可视化（每10秒一次）
-        current_time = self.step_counter * self.dt
+        
         if current_time - self.last_visualization_time >= self.visualization_interval:
             print(f"Visualizing at sim time: {current_time:.2f}s")
             self._visualize_current_state()
             self.last_visualization_time = current_time
+            # 记录轨迹（在重置之前记录）
+            self._record_trajectories()
 
         obs = self._get_obs()
 
-        return obs, reward, done, info
+        return obs, reward, self.done, info
 
     def get_number_of_agents(self):
         """rl-games 要求：返回 agent 数量"""
         return 1
 
-    def get_env_info(self):
+    def get_env_info(self):current_time = self.step_counters[0].item() * self.dt
         return {
             "obs_dim": self.obs_dim,
             "act_dim": self.act_dim,
@@ -144,14 +170,16 @@ class RLGamesEnv:
         q_l = state[:, 6:10]        # (B, 4)
         omega_l = state[:, 10:13]   # (B, 3)
 
-        # 参考状态
-        next_idx = min(self.current_point_index + 1, len(self.ref_traj['Ref_xl']) - 1)
-        ref_xl = torch.tensor(self.ref_traj['Ref_xl'][next_idx], 
-                            dtype=torch.float32, device=self.device).unsqueeze(0).expand(B, 13)
-        p_l_ref = ref_xl[:, 0:3]
-        v_l_ref = ref_xl[:, 3:6]
-        q_l_ref = ref_xl[:, 6:10]
-        omega_l_ref = ref_xl[:, 10:13]
+        # 参考状态 - 为每个环境使用独立的轨迹索引
+        ref_xl_batch = torch.zeros(B, 13, dtype=torch.float32, device=self.device)
+        for i in range(B):
+            next_idx = min(self.current_point_indices[i].item() + 1, len(self.ref_traj['Ref_xl']) - 1)
+            ref_xl_batch[i] = torch.tensor(self.ref_traj['Ref_xl'][next_idx], dtype=torch.float32, device=self.device)
+        
+        p_l_ref = ref_xl_batch[:, 0:3]
+        v_l_ref = ref_xl_batch[:, 3:6]
+        q_l_ref = ref_xl_batch[:, 6:10]
+        omega_l_ref = ref_xl_batch[:, 10:13]
 
         # 误差计算
         pos_error = torch.norm(p_l - p_l_ref, dim=1)
@@ -190,13 +218,8 @@ class RLGamesEnv:
         progress_reward = self.config.get("progress_reward", 1)
         reward += progress_reward * dt
     
-        # # 3. 碰撞惩罚（在_check_done中检测到碰撞时）
-        # collision_penalty = self.config.get("collision_penalty", -10.0)
-        # done = self._check_done()
-        # reward = torch.where(done, collision_penalty, reward)
-        
-        # info
         info = []
+        # info 中也使用每个环境独立的索引
         for i in range(B):
             info.append({
                 'pos_error': pos_error[i].item(),
@@ -208,7 +231,7 @@ class RLGamesEnv:
                 'reward_quat': reward_quat[i].item(),
                 'reward_omega': reward_omega[i].item(),
                 'total_reward': reward[i].item(),
-                'current_point_index': self.current_point_index,
+                'current_point_index': self.current_point_indices[i].item(),  # 使用独立索引
                 'target_position': p_l_ref[i],
                 'current_position': p_l[i],
             })
@@ -219,14 +242,16 @@ class RLGamesEnv:
         # 每个环境一个 done 标志
         done = torch.zeros(B, dtype=torch.bool, device=self.device)
 
-        # 1. 位置误差终止条件
+        # 1. 位置误差终止条件 - 为每个环境使用独立的轨迹索引
         current_pos = self.payload.state[:, 0:3]   # (B, 3)
-        next_idx = min(self.current_point_index + 1, len(self.ref_traj['Ref_xl']) - 1)
-        ref_xl = torch.tensor(self.ref_traj['Ref_xl'][next_idx], 
-                            dtype=torch.float32, device=self.device).unsqueeze(0).expand(B, 13)
-        ref_pos = ref_xl[:, 0:3]  # (B, 3)
-        pos_error = torch.norm(current_pos - ref_pos, dim=1)  # (B,)
-        done |= (pos_error > 10.0)
+        
+        for i in range(B):
+            next_idx = min(self.current_point_indices[i].item() + 1, len(self.ref_traj['Ref_xl']) - 1)
+            ref_xl = torch.tensor(self.ref_traj['Ref_xl'][next_idx], 
+                                dtype=torch.float32, device=self.device)
+            ref_pos = ref_xl[0:3]  # (3,)
+            pos_error = torch.norm(current_pos[i] - ref_pos)  # scalar
+            done[i] |= (pos_error > 10.0)
 
         # 2. 负载高度终止条件（负载高度小于等于0）
         payload_height = current_pos[:, 2]  # Z坐标 (B,)
@@ -283,15 +308,20 @@ class RLGamesEnv:
                 pos, torch.tensor([self.obstacle_r], device=self.device)
             ]).unsqueeze(0).expand(B, 3)
 
-        # 3. ref_xl (B, 13) 和 ref_ul (B, 18)
-        next_idx = min(self.current_point_index + 1, len(self.ref_traj['Ref_xl']) - 1)
-        curr_idx = min(self.current_point_index, len(self.ref_traj['Ref_ul']) - 1)
+        # 3. ref_xl (B, 13) 和 ref_ul (B, 18) - 为每个环境使用独立的轨迹索引
+        ref_xl_batch = torch.zeros(B, 13, dtype=torch.float32, device=self.device)
+        ref_ul_batch = torch.zeros(B, 18, dtype=torch.float32, device=self.device)
         
-        ref_xl = torch.tensor(self.ref_traj['Ref_xl'][next_idx], dtype=torch.float32, device=self.device)
-        ref_ul = torch.tensor(self.ref_traj['Ref_ul'][curr_idx], dtype=torch.float32, device=self.device)
-        ref_xl = ref_xl.unsqueeze(0).expand(B, -1)
-        ref_ul = ref_ul.unsqueeze(0).expand(B, -1)
+        for i in range(B):
+            next_idx = min(self.current_point_indices[i].item() + 1, len(self.ref_traj['Ref_xl']) - 1)
+            curr_idx = min(self.current_point_indices[i].item(), len(self.ref_traj['Ref_ul']) - 1)
+            
+            ref_xl_batch[i] = torch.tensor(self.ref_traj['Ref_xl'][next_idx], dtype=torch.float32, device=self.device)
+            ref_ul_batch[i] = torch.tensor(self.ref_traj['Ref_ul'][curr_idx], dtype=torch.float32, device=self.device)
         
+        ref_xl = ref_xl_batch
+        ref_ul = ref_ul_batch
+
         # 4. drone_radius (B, 1)
         drone_radius = torch.full((B, 1), float(self.drone_radius), device=self.device)
 
@@ -351,3 +381,10 @@ class RLGamesEnv:
                 )
             except Exception as e:
                 print(f"Visualization error: {e}")
+    def _record_trajectories(self):
+        """记录每个环境的负载轨迹"""
+        B = self.num_envs
+        for i in range(B):
+            # 获取当前负载状态
+            payload_pos = self.payload.state[i, 0:3].cpu().numpy()  # 位置
+            self.trajectory_records[i].append(payload_pos)
