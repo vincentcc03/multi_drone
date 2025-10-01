@@ -75,14 +75,14 @@ params:
     save_best_after: 50       # 第 50 轮后才开始保存 best 模型
     save_frequency: 25        # 每隔 25 轮保存一次模型
     score_to_win: 20000       # 达到该分数算成功
-    max_epochs: 150           # 最大训练轮数
+    max_epochs: 1500           # 最大训练轮数
     print_stats: True         # 是否打印训练统计信息
     train_dir: runs           # 训练结果目录
     log_path: runs/           # 日志保存路径
     network_path: ./nn/       # 网络模型保存路径
     games_to_track: 100       # 平滑奖励的采样窗口
-    use_diagnostics: False    # 是否开启诊断模式
-    use_action_masks: False   # 是否启用动作掩码（适合部分动作不可用的情况）
+    use_diagnost : False
+    ics: False    # 是否开启诊断模式    use_action_masks: False   # 是否启用动作掩码（适合部分动作不可用的情况）
     is_train: True            # 是否训练模式（False = 测试模式）
     schedule_type: legacy     # 学习率调度类型
     normalize_advantage: True # 是否标准化 advantage
