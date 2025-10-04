@@ -1,6 +1,8 @@
 import torch
 import numpy as np
 import os
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 import time
 from datetime import datetime
 from rl_games.common import env_configurations
@@ -20,12 +22,6 @@ class RLGamesEnv:
         self.dt = self.config.get("dt")
         self.done = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         
-        # 轨迹记录
-        self.trajectory_records = []  # 每个环境的轨迹记录列表
-        for _ in range(self.num_envs):
-            self.trajectory_records.append([])  # 为每个环境创建空列表
-        self.record_interval = self.config.get("trajectory_record_interval", 10)  # 每10步记录一次
-        self.record_step_counters = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
             
         # 动力学仿真器
         self.payload = PayloadDynamicsSimBatch()
@@ -38,20 +34,25 @@ class RLGamesEnv:
         
         # 可视化
         self.visualizer = DroneVisualization()
-        self.visualization_interval = 1  # 每10秒可视化一次
-        self.last_visualization_time = 0
         self.ref_traj_vis = self.ref_traj['Ref_xl'][:, 0:3]  # 仅位置部分
+        self.payload_traj_list = []
+        for _ in range(self.num_envs):
+            self.payload_traj_list.append([])
+        
         
         # 绳子初始状态
         self.rope_length = self.config.get("rope_length", 1.0)
         self.n_cables = self.cable.n_cables
-        self.cable_init_state = self.cable.state.clone()
+        self.cable_init_state = self.cable.state[0].clone()
+        
+        print("Cable initial state:", self.cable_init_state)
 
         # 无人机 / 障碍物参数
         self.obstacle_pos = torch.tensor(self.config.get("obstacle_pos", []), dtype=torch.float32, device=self.device)
         self.obstacle_r = self.config.get("obstacle_r", 0.1)
         self.drone_radius = self.config.get("drone_radius", 0.125)
         self.r_payload = self.config.get("r_payload", 0.25)
+        print(f"Obstacle positions: {self.obstacle_pos}, radius: {self.obstacle_r}")
         
         # 奖励权重
         self.pos_w = self.config.get("pos_weight", 1.0)
@@ -80,18 +81,28 @@ class RLGamesEnv:
     # ============= rl-games 要求的方法 =============
 
     def reset(self):
-        """批量 reset 所有环境"""
+        """批量 reset 所有环境 - 向量化版本"""
         B = self.num_envs
-        
         # 找出需要重置的环境（done为True的环境）
         reset_mask = self.done  # (B,) boolean tensor
         
         if reset_mask.any():
-            # 重置负载状态 - 只重置done的环境
-            reset_payload_state = self.payload_init_state.unsqueeze(0).expand(reset_mask.sum(), 13).to(self.device)
-            self.payload.state[reset_mask] = reset_payload_state
-            self.cable.state[reset_mask] = self.cable_init_state.to(self.device)
+            # 向量化重置（性能更好）
+            if self.payload_traj_list is not None:
+                self.draw_payload_traj_list()
+            num_reset = reset_mask.sum().item()
+            
+            # 扩展初始状态到需要重置的环境数量
+            payload_init_expanded = self.payload_init_state.unsqueeze(0).expand(num_reset, -1).to(self.device)
+            cable_init_expanded = self.cable_init_state.unsqueeze(0).expand(num_reset, -1, -1).to(self.device)
+            
+            # 批量重置
+            self.payload.state[reset_mask] = payload_init_expanded
+            self.cable.state[reset_mask] = cable_init_expanded
+            
             # 重置计数器
+            print("done:",reset_mask)
+            
             self.current_point_indices[reset_mask] = 0
             self.step_counters[reset_mask] = 0
             
@@ -109,6 +120,7 @@ class RLGamesEnv:
         N = self.n_cables
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device)
         action = action.view(B, N, 4)
+        # print("Action:", action)
 
         # 动力学仿真
         self.cable.rk4_step(action)
@@ -117,7 +129,8 @@ class RLGamesEnv:
         R_l = quat_to_rot(q_l)
         input_force_torque = self.cable.compute_force_torque(R_l)
         self.payload.rk4_step(input_force_torque)
-
+        
+        # print("Payload state:", self.payload.state)
         # 计算无人机位置
         self.compute_drone_positions()
         
@@ -128,23 +141,25 @@ class RLGamesEnv:
         self.done = self._check_done()
         self.reset()
 
-        # 更新轨迹
+        # 更新环境计数器
         self.step_counters += 1
+        # 打印所有环境当前步数
+        print(f"Current step: {self.step_counters}")
         
         # 检查哪些环境需要更新轨迹点
         update_mask = (self.step_counters % int(self.interval) == 0)
         self.current_point_indices[update_mask] += 1
+        print(f"Current point indices: {self.current_point_indices}")
         
        
 
-        # 可视化（每10秒一次）
-        
-        if current_time - self.last_visualization_time >= self.visualization_interval:
+        # 可视化
+        current_time = self.step_counters[0].item() * self.dt
+        print(f"Current sim time: {current_time:.2f}s")
+        if current_time % 0.1 ==0:
             print(f"Visualizing at sim time: {current_time:.2f}s")
             self._visualize_current_state()
-            self.last_visualization_time = current_time
-            # 记录轨迹（在重置之前记录）
-            self._record_trajectories()
+            self._record_payload_trajectories()
 
         obs = self._get_obs()
 
@@ -154,7 +169,7 @@ class RLGamesEnv:
         """rl-games 要求：返回 agent 数量"""
         return 1
 
-    def get_env_info(self):current_time = self.step_counters[0].item() * self.dt
+    def get_env_info(self):
         return {
             "obs_dim": self.obs_dim,
             "act_dim": self.act_dim,
@@ -252,11 +267,14 @@ class RLGamesEnv:
             ref_pos = ref_xl[0:3]  # (3,)
             pos_error = torch.norm(current_pos[i] - ref_pos)  # scalar
             done[i] |= (pos_error > 10.0)
-
+        if done.all():
+            print("Position errors:")
         # 2. 负载高度终止条件（负载高度小于等于0）
         payload_height = current_pos[:, 2]  # Z坐标 (B,)
         done |= (payload_height <= 0.0)
-
+        if done.all():
+            print("Payload heights:")
+            print("payload_state:", self.payload.state)
         # 3. 障碍物碰撞检测（假设 self.obstacle_pos 是 (N, 2)，平面上 N 个障碍物）
         if len(self.obstacle_pos) > 0:
             obs_pos = self.obstacle_pos.to(self.device)        # (N, 2)
@@ -267,6 +285,8 @@ class RLGamesEnv:
             dist_to_obs = torch.norm(payload_xy - obs_pos, dim=2)  # (B, N)
             min_dist, _ = torch.min(dist_to_obs, dim=1)            # (B,)
             done |= (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance))
+            if done.all():
+                print("Min distances to obstacles:")
 
             # 无人机与障碍物碰撞检测
             drone_xy = self.drone_pos[:, :, :2].unsqueeze(2)   # (B, N_cables, 1, 2)
@@ -274,24 +294,29 @@ class RLGamesEnv:
             dist_to_obs = torch.norm(drone_xy - obs_pos, dim=3)  # (B, N_cables, N)
             min_dist, _ = torch.min(dist_to_obs, dim=2)          # (B, N_cables)
             done |= (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any(dim=1)
-
-            # 无人机之间的碰撞检测
-            drone_xy = self.drone_pos[:, :, :2]  # (B, N_cables, 2)
-            drone_z = self.drone_pos[:, :, 2]    # (B, N_cables)
-            for i in range(self.n_cables):
-                for j in range(i+1, self.n_cables):
-                    # xy平面距离
-                    dist_xy = torch.norm(drone_xy[:, i, :] - drone_xy[:, j, :], dim=1)  # (B,)
-                    # z轴距离
-                    dist_z = torch.abs(drone_z[:, i] - drone_z[:, j])  # (B,)
-                    # xy距离和z距离都小于阈值才算碰撞
-                    collision = (dist_xy < (2*self.drone_radius + self.collision_tolerance)) & \
-                                (dist_z < self.drone_high_distance)
-                    done |= collision
-
+            if done.all():
+                print("Min distances from drones to obstacles:")
+                
+            # # 无人机之间的碰撞检测
+            # drone_xy = self.drone_pos[:, :, :2]  # (B, N_cables, 2)
+            # drone_z = self.drone_pos[:, :, 2]    # (B, N_cables)
+            # for i in range(self.n_cables):
+            #     for j in range(i+1, self.n_cables):
+            #         # xy平面距离
+            #         dist_xy = torch.norm(drone_xy[:, i, :] - drone_xy[:, j, :], dim=1)  # (B,)
+            #         # z轴距离
+            #         dist_z = torch.abs(drone_z[:, i] - drone_z[:, j])  # (B,)
+            #         # xy距离和z距离都小于阈值才算碰撞
+            #         collision = (dist_xy < (2*self.drone_radius + self.collision_tolerance)) & \
+            #                     (dist_z < self.drone_high_distance)
+            #         done |= collision
+            #         if done.all():
+            #             print("Drone collisions:")
+                    
         # 4. 绳子拉力终止条件
         done |= (self.cable.T > self.t_max).any(dim=1)
-
+        if done.all():
+            print("Max cable tensions:")
         return done
     
     def _get_obs(self):
@@ -377,14 +402,99 @@ class RLGamesEnv:
                     obstacle_radius=self.obstacle_r,
                     payload_radius=self.r_payload,
                     drone_radius=self.drone_radius,
-                    current_step=self.step_counter
+                    current_step=self.step_counters[0].item()
                 )
             except Exception as e:
                 print(f"Visualization error: {e}")
-    def _record_trajectories(self):
+    def _record_payload_trajectories(self):
         """记录每个环境的负载轨迹"""
-        B = self.num_envs
-        for i in range(B):
-            # 获取当前负载状态
-            payload_pos = self.payload.state[i, 0:3].cpu().numpy()  # 位置
-            self.trajectory_records[i].append(payload_pos)
+        for i in range(self.num_envs):
+            self.payload_traj_list[i].append(self.payload.state[i, 0:3].cpu().numpy())
+    
+    def draw_payload_traj_list(self):
+        """绘制所有环境的负载3D轨迹并保存到results/payload目录"""
+        if not self.payload_traj_list or not any(traj for traj in self.payload_traj_list):
+            print("No trajectory data to plot")
+            return
+        
+        # 创建保存目录
+        save_dir = "results/payload"
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # 创建3D图形
+        fig = plt.figure(figsize=(12, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # 为每个环境绘制轨迹
+        colors = plt.cm.tab10(np.linspace(0, 1, self.num_envs))
+        
+        for env_idx in range(self.num_envs):
+            if len(self.payload_traj_list[env_idx]) > 1:  # 至少需要2个点才能画轨迹
+                traj = np.array(self.payload_traj_list[env_idx])  # (n_points, 3)
+                ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 
+                       color=colors[env_idx], 
+                       label=f'Env {env_idx}', 
+                       linewidth=2, 
+                       alpha=0.8)
+                
+                # 标记起点和终点
+                ax.scatter(traj[0, 0], traj[0, 1], traj[0, 2], 
+                          color=colors[env_idx], marker='o', s=50, alpha=0.8)
+                ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], 
+                          color=colors[env_idx], marker='s', s=50, alpha=0.8)
+        
+        # 绘制参考轨迹
+        if hasattr(self, 'ref_traj_vis') and self.ref_traj_vis is not None:
+            ref_traj = np.array(self.ref_traj_vis)
+            ax.plot(ref_traj[:, 0], ref_traj[:, 1], ref_traj[:, 2], 
+                   'k--', linewidth=2, alpha=0.6, label='Reference')
+        
+        # 绘制障碍物
+        if len(self.obstacle_pos) > 0:
+            for i, obs_pos in enumerate(self.obstacle_pos.cpu().numpy()):
+                # 绘制圆柱形障碍物（在地面到一定高度）
+                theta = np.linspace(0, 2*np.pi, 20)
+                z_obs = np.linspace(0, 3, 10)  # 假设障碍物高度为3m
+                
+                for z in z_obs:
+                    x_circle = obs_pos[0] + self.obstacle_r * np.cos(theta)
+                    y_circle = obs_pos[1] + self.obstacle_r * np.sin(theta)
+                    z_circle = np.full_like(x_circle, z)
+                    ax.plot(x_circle, y_circle, z_circle, 'r-', alpha=0.3)
+        
+        # 设置图形属性
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_zlabel('Z (m)')
+        ax.set_title(f'Payload Trajectories - {self.num_envs} Environments')
+        ax.legend()
+        ax.grid(True)
+        
+        # 设置相等的坐标轴比例
+        max_range = 0
+        for env_idx in range(self.num_envs):
+            if len(self.payload_traj_list[env_idx]) > 0:
+                traj = np.array(self.payload_traj_list[env_idx])
+                max_range = max(max_range, np.max(np.abs(traj)))
+        
+        if max_range > 0:
+            ax.set_xlim([-max_range, max_range])
+            ax.set_ylim([-max_range, max_range])
+            ax.set_zlim([0, max_range])
+        
+        # 保存图片
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"payload_trajectories_{timestamp}.png"
+        filepath = os.path.join(save_dir, filename)
+        
+        plt.tight_layout()
+        plt.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close()  # 关闭图形以释放内存
+        
+        print(f"Payload trajectories saved to: {filepath}")
+        
+        # 清空轨迹记录器
+        for env_idx in range(self.num_envs):
+            self.payload_traj_list[env_idx].clear()
+        
+        print("Trajectory records cleared")

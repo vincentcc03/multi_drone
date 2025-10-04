@@ -41,6 +41,6 @@ progress_reward: 0.1     # 轨迹进展奖励
 collision_penalty: -10.0 # 碰撞惩罚
 
 # 终止条件
-collision_tolerance: 0.1 # 碰撞容忍度 (m)
-drone_high_distance: 0.2 # 无人机碰撞高度检测
+collision_tolerance: 0.01 # 碰撞容忍度 (m)
+drone_high_distance: 0.01 # 无人机碰撞高度检测
 t_max: 50.0               # 最大绳子张力 (N)

@@ -5,10 +5,10 @@ from src.utils.computer import hat, Omega, quat_to_rot
 class PayloadDynamicsSimBatch:
     def __init__(self):
         config = load_config("env_config.yaml")
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.envs = config.get("envs", 1)
+        self.device = torch.device("cuda" )
+        self.envs = config.get("envs")
 
-        
+    
         
         # 设置负载参数
         self.m_l = config.get("m_l", 1.0)
