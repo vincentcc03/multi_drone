@@ -75,7 +75,7 @@ params:
     save_best_after: 50       # 第 50 轮后才开始保存 best 模型
     save_frequency: 25        # 每隔 25 轮保存一次模型
     score_to_win: 20000       # 达到该分数算成功
-    max_epochs: 1500           # 最大训练轮数
+    max_epochs: 30000           # 最大训练轮数
     print_stats: True         # 是否打印训练统计信息
     train_dir: runs           # 训练结果目录
     log_path: runs/           # 日志保存路径
