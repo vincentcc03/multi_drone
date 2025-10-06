@@ -12,6 +12,31 @@ from src.envs.dynamics.rope_dynamic import CableDynamicsSimBatch
 from src.utils.read_yaml import load_config
 from src.utils.computer import quat_to_rot
 from src.utils.plot_ppo import DroneVisualization
+from src.utils.log import TrainingLogger
+
+# 控制print输出的开关
+ENABLE_PRINT = False  # 设置为False即可关闭所有print
+
+# 控制可视化的开关
+ENABLE_VISUALIZATION = False  # 设置为False即可关闭所有可视化
+
+# 重定义print函数
+if not ENABLE_PRINT:
+    def print(*args, **kwargs):
+        pass
+
+# 重定义可视化相关函数
+if not ENABLE_VISUALIZATION:
+    def _visualize_current_state(self):
+        pass
+    
+    def draw_payload_traj_list(self):
+        pass
+    
+    # 可以添加到类中作为方法覆盖
+    def _dummy_visualize(*args, **kwargs):
+        pass
+
 
 class RLGamesEnv:
     def __init__(self, config_name, traj_name, num_envs=1, device="cuda"):
@@ -21,8 +46,8 @@ class RLGamesEnv:
         self.num_envs = num_envs
         self.dt = self.config.get("dt")
         self.done = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-        
-            
+        self.logger = TrainingLogger()
+        self.reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         # 动力学仿真器
         self.payload = PayloadDynamicsSimBatch()
         self.cable = CableDynamicsSimBatch()
@@ -31,6 +56,7 @@ class RLGamesEnv:
         self.ref_traj = generate_complete_trajectory()
         self.payload_init_state = torch.from_numpy(self.ref_traj['Ref_xl'][0]).float()
         print("Payload initial state:", self.payload_init_state)
+        
         
         # 可视化
         self.visualizer = DroneVisualization()
@@ -87,6 +113,7 @@ class RLGamesEnv:
         reset_mask = self.done  # (B,) boolean tensor
         
         if reset_mask.any():
+            self.logger.log_step(self.step_counters.max().item(), self.reward.max().item())
             # 向量化重置（性能更好）
             if self.payload_traj_list is not None:
                 self.draw_payload_traj_list()
@@ -99,11 +126,11 @@ class RLGamesEnv:
             # 批量重置
             self.payload.state[reset_mask] = payload_init_expanded
             self.cable.state[reset_mask] = cable_init_expanded
-            
+            self.reward[reset_mask] = 0.0
             # 重置计数器
-            print("done:",reset_mask)
+            # print("done:",reset_mask)
             
-            self.current_point_indices[reset_mask] = 0
+            self.current_point_indices[reset_mask] = 1
             self.step_counters[reset_mask] = 0
             
             self.done[reset_mask] = False
@@ -137,10 +164,14 @@ class RLGamesEnv:
         
 
         # 奖励 + done
-        reward, info = self._compute_reward(action)
-        self.done = self._check_done()
+        reward = self._compute_reward(action)
+        self.reward += reward
+        print("total_rewards:", self.reward)
+        max_reward = self.reward.max().item()
+        print(f"max reward: {max_reward}")
+        self.done , info = self._check_done()
         self.reset()
-
+        
         # 更新环境计数器
         self.step_counters += 1
         # 打印所有环境当前步数
@@ -152,14 +183,13 @@ class RLGamesEnv:
         print(f"Current point indices: {self.current_point_indices}")
         
        
-
         # 可视化
         current_time = self.step_counters[0].item() * self.dt
-        print(f"Current sim time: {current_time:.2f}s")
-        if current_time % 0.1 ==0:
-            print(f"Visualizing at sim time: {current_time:.2f}s")
+        # print(f"Current sim time: {current_time:.2f}s")
+        if current_time % 0.02 ==0:
+            # print(f"Visualizing at sim time: {current_time:.2f}s")
             self._visualize_current_state()
-            self._record_payload_trajectories()
+            # self._record_payload_trajectories()
 
         obs = self._get_obs()
 
@@ -201,56 +231,47 @@ class RLGamesEnv:
         vel_error = torch.norm(v_l - v_l_ref, dim=1)
         quat_error = 1.0 - torch.abs(torch.sum(q_l * q_l_ref, dim=1))
         omega_error = torch.norm(omega_l - omega_l_ref, dim=1)
+        # print ("p_l_ref:", p_l_ref)
+        # print(f"Position errors: {pos_error}")
+        # print(f"Velocity errors: {vel_error}")
+        # print(f"Quaternion errors: {quat_error}")
+        # print(f"Omega errors: {omega_error}")
 
         # 指数型奖励设计
         dt = self.config.get("dt")  # 仿真步长
         
         # 位置奖励：指数衰减
         pos_scale = self.config.get("pos_reward_scale")  # 距离缩放系数
-        reward_pos = self.pos_w * torch.exp(-pos_error * pos_scale) * dt
+        reward_pos = self.pos_w * torch.exp(-pos_error) * dt * pos_scale
         
         # 速度奖励：指数衰减
         vel_scale = self.config.get("vel_reward_scale")
-        reward_vel = self.vel_w * torch.exp(-vel_error * vel_scale) * dt
+        reward_vel = self.vel_w * torch.exp(-vel_error) * dt * vel_scale
         
         # 姿态奖励：指数衰减
         quat_scale = self.config.get("quat_reward_scale")  # 四元数误差通常较小
-        reward_quat = self.quat_w * torch.exp(-quat_error * quat_scale) * dt
-        
+        reward_quat = self.quat_w * torch.exp(-quat_error) * dt * quat_scale
+
         # 角速度奖励：指数衰减
         omega_scale = self.config.get("omega_reward_scale")
-        reward_omega = self.omega_w * torch.exp(-omega_error * omega_scale) * dt
-        
+        reward_omega = self.omega_w * torch.exp(-omega_error) * dt * omega_scale
+
         # 总奖励：正值，鼓励减小误差
         reward = reward_pos + reward_vel + reward_quat + reward_omega
+        # print(f"Reward components - Pos: {reward_pos.mean().item():.4f}, Vel: {reward_vel.mean().item():.4f}, Quat: {reward_quat.mean().item():.4f}, Omega: {reward_omega.mean().item():.4f}")
+        
         
         # 可选：添加额外奖励项
         # 1. 到达目标点的奖励
-        if pos_error.min() < 0.1:  # 到达目标附近
-            reward += 100 * dt
+        # if pos_error.min() < 0.1:  # 到达目标附近
+        #     reward += 100 * dt
     
-        # 2. 轨迹进展奖励
-        progress_reward = self.config.get("progress_reward", 1)
-        reward += progress_reward * dt
+        # # 2. 轨迹进展奖励
+        # progress_reward = self.config.get("progress_reward", 1)
+        # reward += progress_reward * dt
     
-        info = []
-        # info 中也使用每个环境独立的索引
-        for i in range(B):
-            info.append({
-                'pos_error': pos_error[i].item(),
-                'vel_error': vel_error[i].item(),
-                'quat_error': quat_error[i].item(),
-                'omega_error': omega_error[i].item(),
-                'reward_pos': reward_pos[i].item(),
-                'reward_vel': reward_vel[i].item(),
-                'reward_quat': reward_quat[i].item(),
-                'reward_omega': reward_omega[i].item(),
-                'total_reward': reward[i].item(),
-                'current_point_index': self.current_point_indices[i].item(),  # 使用独立索引
-                'target_position': p_l_ref[i],
-                'current_position': p_l[i],
-            })
-        return reward, info
+        
+        return reward
 
     def _check_done(self):
         B = self.num_envs
@@ -266,15 +287,15 @@ class RLGamesEnv:
                                 dtype=torch.float32, device=self.device)
             ref_pos = ref_xl[0:3]  # (3,)
             pos_error = torch.norm(current_pos[i] - ref_pos)  # scalar
-            done[i] |= (pos_error > 10.0)
-        if done.all():
-            print("Position errors:")
+            done[i] |= (pos_error > 0.3)
+        # if done.all():
+        #     print("Position errors:")
         # 2. 负载高度终止条件（负载高度小于等于0）
         payload_height = current_pos[:, 2]  # Z坐标 (B,)
         done |= (payload_height <= 0.0)
-        if done.all():
-            print("Payload heights:")
-            print("payload_state:", self.payload.state)
+        # if done.all():
+            # print("Payload heights:")
+            # print("payload_state:", self.payload.state)
         # 3. 障碍物碰撞检测（假设 self.obstacle_pos 是 (N, 2)，平面上 N 个障碍物）
         if len(self.obstacle_pos) > 0:
             obs_pos = self.obstacle_pos.to(self.device)        # (N, 2)
@@ -285,8 +306,8 @@ class RLGamesEnv:
             dist_to_obs = torch.norm(payload_xy - obs_pos, dim=2)  # (B, N)
             min_dist, _ = torch.min(dist_to_obs, dim=1)            # (B,)
             done |= (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance))
-            if done.all():
-                print("Min distances to obstacles:")
+            # if done.all():
+            #     print("Min distances to obstacles:")
 
             # 无人机与障碍物碰撞检测
             drone_xy = self.drone_pos[:, :, :2].unsqueeze(2)   # (B, N_cables, 1, 2)
@@ -294,8 +315,8 @@ class RLGamesEnv:
             dist_to_obs = torch.norm(drone_xy - obs_pos, dim=3)  # (B, N_cables, N)
             min_dist, _ = torch.min(dist_to_obs, dim=2)          # (B, N_cables)
             done |= (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any(dim=1)
-            if done.all():
-                print("Min distances from drones to obstacles:")
+            # if done.all():
+                # print("Min distances from drones to obstacles:")
                 
             # # 无人机之间的碰撞检测
             # drone_xy = self.drone_pos[:, :, :2]  # (B, N_cables, 2)
@@ -315,17 +336,24 @@ class RLGamesEnv:
                     
         # 4. 绳子拉力终止条件
         done |= (self.cable.T > self.t_max).any(dim=1)
-        if done.all():
-            print("Max cable tensions:")
-        return done
-    
+        # if done.all():
+            # print("Max cable tensions:")
+            
+        info = [{} for _ in range(B)]
+        for i in range(B):
+            if done[i]:
+                info[i]["episode"] = {
+                    "step": self.step_counters[i].item(),
+                    "total_reward": self.reward[i].item()  # 注意这里要用累计奖励
+                }
+        return done, info
+
     def _get_obs(self):
         B = self.num_envs
 
         # 1. rg_mag (B, 1)
         r_g_mag = self.payload.r_g.norm().item()
         r_g_mag = torch.full((B, 1), r_g_mag, device=self.device)  # (B, 1)
-
         # 2. 障碍物信息 (B, 6) - 假设最多2个障碍物
         obstacle_info = torch.zeros(B, 6, device=self.device)
         for i, pos in enumerate(self.obstacle_pos[:2]):  # 最多取前2个

@@ -2,6 +2,7 @@ import torch
 from src.utils.read_yaml import load_config
 from src.utils.computer import hat, Omega, quat_to_rot
 
+
 class PayloadDynamicsSimBatch:
     def __init__(self):
         config = load_config("env_config.yaml")

@@ -234,12 +234,87 @@ def plot_3d_trajectory(trajectory, config_path="traj_config.yaml"):
 
 # 使用示例
 if __name__ == "__main__":
+    print("=" * 60)
+    print("开始生成完整轨迹...")
+    print("=" * 60)
+    
     # 生成完整轨迹
     trajectory = generate_complete_trajectory()
     
+    print(f"✓ 轨迹生成完成！")
     print(f"完整状态轨迹维度: {trajectory['Ref_xl'].shape}")
+    print(f"控制输入轨迹维度: {trajectory['Ref_ul'].shape}")
     print(f"位置轨迹维度: {trajectory['Ref_pl'].shape}")
+    print(f"力和力矩轨迹维度: {trajectory['Ref_Wl'].shape}")
+    print(f"向心加速度轨迹维度: {trajectory['Ref_ac'].shape}")
     print(f"时间序列长度: {trajectory['Time'].shape}")
     
-    # 画出三维轨迹
-    plot_3d_trajectory(trajectory)
+    print("\n" + "=" * 60)
+    print("轨迹数据详细信息:")
+    print("=" * 60)
+    
+    # 打印时间信息
+    print(f"总仿真时间: {trajectory['Time'][-1]:.3f} 秒")
+    print(f"时间步长: {trajectory['Time'][1] - trajectory['Time'][0]:.4f} 秒")
+    print(f"轨迹点数量: {len(trajectory['Time'])}")
+    
+    # 打印位置轨迹信息
+    print(f"\n📍 位置轨迹范围:")
+    print(f"  X: [{trajectory['Ref_pl'][:, 0].min():.3f}, {trajectory['Ref_pl'][:, 0].max():.3f}] m")
+    print(f"  Y: [{trajectory['Ref_pl'][:, 1].min():.3f}, {trajectory['Ref_pl'][:, 1].max():.3f}] m")
+    print(f"  Z: [{trajectory['Ref_pl'][:, 2].min():.3f}, {trajectory['Ref_pl'][:, 2].max():.3f}] m")
+    
+    # 打印初始状态
+    print(f"\n🚀 初始状态 (t=0):")
+    print(f"  位置: [{trajectory['Ref_xl'][0, 0]:.3f}, {trajectory['Ref_xl'][0, 1]:.3f}, {trajectory['Ref_xl'][0, 2]:.3f}] m")
+    print(f"  速度: [{trajectory['Ref_xl'][0, 3]:.3f}, {trajectory['Ref_xl'][0, 4]:.3f}, {trajectory['Ref_xl'][0, 5]:.3f}] m/s")
+    print(f"  四元数: [{trajectory['Ref_xl'][0, 6]:.3f}, {trajectory['Ref_xl'][0, 7]:.3f}, {trajectory['Ref_xl'][0, 8]:.3f}, {trajectory['Ref_xl'][0, 9]:.3f}]")
+    print(f"  角速度: [{trajectory['Ref_xl'][0, 10]:.3f}, {trajectory['Ref_xl'][0, 11]:.3f}, {trajectory['Ref_xl'][0, 12]:.3f}] rad/s")
+    
+    # 打印终止状态
+    print(f"\n🏁 终止状态 (t={trajectory['Time'][-1]:.3f}s):")
+    print(f"  位置: [{trajectory['Ref_xl'][-1, 0]:.3f}, {trajectory['Ref_xl'][-1, 1]:.3f}, {trajectory['Ref_xl'][-1, 2]:.3f}] m")
+    print(f"  速度: [{trajectory['Ref_xl'][-1, 3]:.3f}, {trajectory['Ref_xl'][-1, 4]:.3f}, {trajectory['Ref_xl'][-1, 5]:.3f}] m/s")
+    print(f"  四元数: [{trajectory['Ref_xl'][-1, 6]:.3f}, {trajectory['Ref_xl'][-1, 7]:.3f}, {trajectory['Ref_xl'][-1, 8]:.3f}, {trajectory['Ref_xl'][-1, 9]:.3f}]")
+    print(f"  角速度: [{trajectory['Ref_xl'][-1, 10]:.3f}, {trajectory['Ref_xl'][-1, 11]:.3f}, {trajectory['Ref_xl'][-1, 12]:.3f}] rad/s")
+    
+    # 打印一些中间时刻的轨迹点
+    print(f"\n📊 轨迹采样点 (每10%显示一个点):")
+    step_size = len(trajectory['Time']) // 100
+    for i in range(0, len(trajectory['Time']), step_size):
+        if i < len(trajectory['Time']):
+            t = trajectory['Time'][i]
+            pos = trajectory['Ref_pl'][i]
+            print(f"  t={t:6.3f}s: 位置=[{pos[0]:6.3f}, {pos[1]:6.3f}, {pos[2]:6.3f}] m")
+    
+    # 计算速度信息
+    velocities = trajectory['Ref_xl'][:, 3:6]  # 提取速度分量
+    speeds = np.linalg.norm(velocities, axis=1)  # 计算速度大小
+    
+    print(f"\n🏃 速度统计:")
+    print(f"  最大速度: {speeds.max():.3f} m/s")
+    print(f"  平均速度: {speeds.mean():.3f} m/s")
+    print(f"  最小速度: {speeds.min():.3f} m/s")
+    
+    # 控制输入信息
+    if trajectory['Ref_ul'].size > 0:
+        print(f"\n🎮 控制输入统计:")
+        print(f"  力输入范围: [{trajectory['Ref_ul'][:, 0:3].min():.3f}, {trajectory['Ref_ul'][:, 0:3].max():.3f}] N")
+        print(f"  力矩输入范围: [{trajectory['Ref_ul'][:, 3:6].min():.3f}, {trajectory['Ref_ul'][:, 3:6].max():.3f}] N⋅m")
+    
+    print(f"\n" + "=" * 60)
+    print("是否绘制三维轨迹图？")
+    print("=" * 60)
+    
+    # 询问是否绘制图形
+    try:
+        response = input("输入 'y' 或 'yes' 来绘制轨迹图 (默认: n): ").lower().strip()
+        if response in ['y', 'yes']:
+            print("正在绘制三维轨迹图...")
+            plot_3d_trajectory(trajectory)
+        else:
+            print("跳过轨迹绘制")
+    except KeyboardInterrupt:
+        print("\n跳过轨迹绘制")
+    
+    print(f"\n✅ 轨迹生成和分析完成！")
