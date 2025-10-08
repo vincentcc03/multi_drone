@@ -32,12 +32,12 @@ vel_weight: 0          # 速度权重
 quat_weight: 0         # 姿态权重
 omega_weight: 0       # 角速度权重
 
-pos_reward_scale: 10    # 位置误差缩放（值越大，对误差越敏感）
-vel_reward_scale: 10    # 速度误差缩放
-quat_reward_scale: 10  # 姿态误差缩放
-omega_reward_scale: 10  # 角速度误差缩放
+pos_reward_scale: 1    # 位置误差缩放（值越大，对误差越敏感）
+vel_reward_scale: 1    # 速度误差缩放
+quat_reward_scale: 1  # 姿态误差缩放
+omega_reward_scale: 1  # 角速度误差缩放
 
-progress_reward: 0.1     # 轨迹进展奖励
+progress_reward: 0.2     # 轨迹进展奖励
 collision_penalty: -10.0 # 碰撞惩罚
 
 # 终止条件
