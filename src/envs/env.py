@@ -106,7 +106,7 @@ class RLGamesEnv:
         self.reset()
     # ============= rl-games 要求的方法 =============
 
-    def reset(self):
+    def reset(self): 
         """批量 reset 所有环境 - 向量化版本"""
         B = self.num_envs
         # 找出需要重置的环境（done为True的环境）
@@ -266,9 +266,9 @@ class RLGamesEnv:
         # if pos_error.min() < 0.1:  # 到达目标附近
         #     reward += 100 * dt
     
-        # # 2. 轨迹进展奖励
-        # progress_reward = self.config.get("progress_reward", 1)
-        # reward += progress_reward * dt
+        # 2. 轨迹进展奖励
+        progress_reward = self.config.get("progress_reward", 1)
+        reward += progress_reward * dt
     
         
         return reward
@@ -287,7 +287,7 @@ class RLGamesEnv:
                                 dtype=torch.float32, device=self.device)
             ref_pos = ref_xl[0:3]  # (3,)
             pos_error = torch.norm(current_pos[i] - ref_pos)  # scalar
-            done[i] |= (pos_error > 0.3)
+            done[i] |= (pos_error > 0.15)
         # if done.all():
         #     print("Position errors:")
         # 2. 负载高度终止条件（负载高度小于等于0）
