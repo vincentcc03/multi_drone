@@ -90,6 +90,7 @@ class RLGamesEnv:
         self.collision_tolerance = self.config.get("collision_tolerance", 0.05)
         self.drone_high_distance = self.config.get("drone_high_distance", 0.5) #无人机间高度碰撞距离
         self.t_max = self.config.get("t_max", 100.0)
+        self.pos_error_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
         # episode 计数
         self.current_point_indices = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -127,6 +128,7 @@ class RLGamesEnv:
             self.payload.state[reset_mask] = payload_init_expanded
             self.cable.state[reset_mask] = cable_init_expanded
             self.reward[reset_mask] = 0.0
+            self.pos_error_count[reset_mask] = 0
             # 重置计数器
             # print("done:",reset_mask)
             
@@ -242,19 +244,19 @@ class RLGamesEnv:
         
         # 位置奖励：指数衰减
         pos_scale = self.config.get("pos_reward_scale")  # 距离缩放系数
-        reward_pos = self.pos_w * torch.exp(-pos_error) * dt * pos_scale
+        reward_pos = -self.pos_w * torch.norm(pos_error) * dt * pos_scale
         
         # 速度奖励：指数衰减
         vel_scale = self.config.get("vel_reward_scale")
-        reward_vel = self.vel_w * torch.exp(-vel_error) * dt * vel_scale
-        
+        reward_vel = -self.vel_w * torch.norm(vel_error) * dt * vel_scale
+
         # 姿态奖励：指数衰减
         quat_scale = self.config.get("quat_reward_scale")  # 四元数误差通常较小
-        reward_quat = self.quat_w * torch.exp(-quat_error) * dt * quat_scale
+        reward_quat = -self.quat_w * torch.norm(quat_error) * dt * quat_scale
 
         # 角速度奖励：指数衰减
         omega_scale = self.config.get("omega_reward_scale")
-        reward_omega = self.omega_w * torch.exp(-omega_error) * dt * omega_scale
+        reward_omega = -self.omega_w * torch.norm(omega_error) * dt * omega_scale
 
         # 总奖励：正值，鼓励减小误差
         reward = reward_pos + reward_vel + reward_quat + reward_omega
@@ -287,7 +289,10 @@ class RLGamesEnv:
                                 dtype=torch.float32, device=self.device)
             ref_pos = ref_xl[0:3]  # (3,)
             pos_error = torch.norm(current_pos[i] - ref_pos)  # scalar
-            done[i] |= (pos_error > 0.15)
+            if pos_error > self.config.get("pos_error_threshold", 0.15):  # 位置误差过大
+                self.pos_error_count[i] += 1
+            if self.pos_error_count[i] >= self.config.get("pos_error_count", 5):  # 连续5步误差过大
+                done[i] = True
         # if done.all():
         #     print("Position errors:")
         # 2. 负载高度终止条件（负载高度小于等于0）

@@ -44,3 +44,5 @@ collision_penalty: -10.0 # 碰撞惩罚
 collision_tolerance: 0.01 # 碰撞容忍度 (m)
 drone_high_distance: 0.01 # 无人机碰撞高度检测
 t_max: 50.0               # 最大绳子张力 (N)
+pos_error_threshold: 0.15 # 位置误差阈值
+pos_error_count: 5       # 连续位置误差超过阈值的步
