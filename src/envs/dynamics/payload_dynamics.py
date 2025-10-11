@@ -28,6 +28,7 @@ class PayloadDynamicsSimBatch:
         self.state = torch.zeros(self.envs, 13, device=self.device)
         self.state[:, 6] = 1.0  # 单位四元数
         self.omega_dot = torch.zeros(self.envs, 3, device=self.device)
+        self.v_dot = torch.zeros(self.envs, 3, device=self.device)
 
     def dynamics(self, state, input_force_torque):
         B = self.envs
@@ -71,6 +72,7 @@ class PayloadDynamicsSimBatch:
         
         omega_dot = torch.matmul(self.j_inv, (term1 + term2 + term3).T).T  # (B,3)
         self.omega_dot = omega_dot
+        self.v_dot = v_dot
         return torch.cat([p_dot, v_dot, q_dot, omega_dot], dim=1)  # (B,13)
 
 

@@ -7,7 +7,7 @@ device: cuda
 m_l: 3.0                  # 负载质量 (kg)
 J_l: 6                 # 负载转动惯量 (kg⋅m²)
 r_g: [0, 0, 0]         # 负载重心偏移
-g: 9.81                   # 重力加速度
+g: 10                   # 重力加速度
 r_payload: 0.25        # 负载半径 (m)
 
 # 绳子参数
@@ -29,7 +29,7 @@ obstacle_r: 0.5           # 障碍物半径 (m)
 # 在你的config文件中添加这些参数
 pos_weight: 1.0          # 位置权重
 vel_weight: 0          # 速度权重
-quat_weight: 0         # 姿态权重
+quat_weight: 0       # 姿态权重
 omega_weight: 0       # 角速度权重
 
 pos_reward_scale: 1    # 位置误差缩放（值越大，对误差越敏感）
