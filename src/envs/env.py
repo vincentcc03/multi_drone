@@ -18,7 +18,7 @@ from src.utils.log import TrainingLogger
 ENABLE_PRINT = False  # 设置为False即可关闭所有print
 
 # 控制可视化的开关
-ENABLE_VISUALIZATION = False  # 设置为False即可关闭所有可视化
+ENABLE_VISUALIZATION = True  # 设置为False即可关闭所有可视化
 
 # 重定义print函数
 if not ENABLE_PRINT:
@@ -41,12 +41,16 @@ class RLGamesEnv:
         self.cable = CableDynamicsSimBatch()
         self.v_dot = self.payload.v_dot 
         self.omega_dot = self.payload.omega_dot
-
+        
+        # 奖励log
+        self.reward_log = torch.zeros(4, dtype=torch.float32, device=self.device)
         # 参考轨迹
         self.ref_traj = generate_complete_trajectory()
         self.payload_init_state = torch.from_numpy(self.ref_traj['Ref_xl'][0]).float()
         print("Payload initial state:", self.payload_init_state)
-        
+        # 轨迹进展
+        self.traj_progress = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+
         
         # 可视化
         self.visualizer = DroneVisualization()
@@ -104,7 +108,7 @@ class RLGamesEnv:
         reset_mask = self.done  # (B,) boolean tensor
         
         if reset_mask.any():
-            self.logger.log_step(self.step_counters.max().item(), self.reward.max().item())
+            self.logger.log_step(self.step_counters.max().item(), self.reward.max().item(), self.reward_log[0].item(), self.reward_log[1].item(), self.reward_log[2].item(), self.reward_log[3].item())
             # 向量化重置（性能更好）
             if reset_mask[0].item():  # 如果第一个环境需要重置，清空其轨迹记录器
                 self.draw_payload_traj_list()
@@ -139,7 +143,7 @@ class RLGamesEnv:
         N = self.n_cables
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device)
         action = action.view(B, N, 4)
-        action *= 10
+        action *= 5
         # print("Action:", action)
 
         # 动力学仿真
@@ -158,12 +162,12 @@ class RLGamesEnv:
         
 
         # 奖励 + done
+        self.done , info = self._check_done()
         reward = self._compute_reward(action)
         self.reward += reward
         print("total_rewards:", self.reward)
         max_reward = self.reward.max().item()
         print(f"max reward: {max_reward}")
-        self.done , info = self._check_done()
         self.reset()
         
         # 更新环境计数器
@@ -236,12 +240,11 @@ class RLGamesEnv:
         # print(f"Quaternion errors: {quat_error}")
         # print(f"Omega errors: {omega_error}")
 
-        # 指数型奖励设计
         dt = self.config.get("dt")  # 仿真步长
         
         # 位置奖励：指数衰减
         pos_scale = self.config.get("pos_reward_scale")  # 距离缩放系数
-        reward_pos = self.pos_w * torch.exp(-pos_error) * dt * pos_scale
+        reward_pos = -self.pos_w * pos_error * dt * pos_scale
         
         # 速度奖励：指数衰减
         vel_scale = self.config.get("vel_reward_scale")
@@ -249,17 +252,27 @@ class RLGamesEnv:
 
         # 姿态奖励：指数衰减
         quat_scale = self.config.get("quat_reward_scale")  # 四元数误差通常较小
-        reward_quat = self.quat_w * torch.exp(-quat_error) * dt * quat_scale
+        reward_quat = -self.quat_w * quat_error * dt * quat_scale
 
         # 角速度奖励：指数衰减
         omega_scale = self.config.get("omega_reward_scale")
         reward_omega = -self.omega_w * omega_error * dt * omega_scale
 
         # 总奖励：正值，鼓励减小误差
+        self.reward_log[0] = reward_pos.mean().item()
+        self.reward_log[1] = reward_vel.mean().item()
+        self.reward_log[2] = reward_quat.mean().item()
+        self.reward_log[3] = reward_omega.mean().item()
         reward = reward_pos + reward_vel + reward_quat + reward_omega
-        print(f"Reward components : {reward_pos.mean().item():.4f}, {reward_vel.mean().item():.4f}, {reward_quat.mean().item():.4f}, {reward_omega.mean().item():.4f}")
         
         
+        # # 进度奖励
+
+        # progress_reach = (self.current_point_indices > 20) & (pos_error < 0.05)
+        # reward += progress_reach.float() * 0.1
+
+        # # 终止惩罚
+        # reward += self.config.get("done_penalty", -1.0) * self.done.float()
         # 可选：添加额外奖励项
         # 1. 到达目标点的奖励
         # if pos_error.min() < 0.1:  # 到达目标附近
@@ -269,13 +282,13 @@ class RLGamesEnv:
         # traj_progress = self.current_point_indices.float() / 100
         # 动作平滑奖励
         # action_smoothness = -self.payload.v_dot.norm(dim=1) - self.payload.omega_dot.norm(dim=1)
-        progress_reward = self.config.get("progress_reward", 1)
-        reward += progress_reward * dt
+        # progress_reward = self.config.get("progress_reward", 1)
+        # reward += progress_reward * dt
         # reward += action_smoothness * dt
         # print(f"Progress reward: {progress_reward * dt}，action_smoothness: {action_smoothness.mean().item()*dt:.4f}")
         # reward += traj_progress * dt
         # print(f"Progress reward: {progress_reward * dt}, Traj progress: {(traj_progress * dt).mean().item():.4f}")
-     
+        print(f"Reward components : {reward_pos.mean().item():.6f}, {reward_vel.mean().item():.6f}, {reward_quat.mean().item():.6f}, {reward_omega.mean().item():.6f}")
         
         return reward
 
@@ -284,21 +297,21 @@ class RLGamesEnv:
         # 每个环境一个 done 标志
         done = torch.zeros(B, dtype=torch.bool, device=self.device)
 
-        # 1. 位置误差终止条件 - 为每个环境使用独立的轨迹索引
+        # # 1. 位置误差终止条件 - 为每个环境使用独立的轨迹索引
         current_pos = self.payload.state[:, 0:3]   # (B, 3)
-        for i in range(B):
-            next_idx = min(self.current_point_indices[i].item() + 1, len(self.ref_traj['Ref_xl']) - 1)
-            ref_xl = torch.tensor(self.ref_traj['Ref_xl'][next_idx], 
-                                dtype=torch.float32, device=self.device)
-            ref_pos = ref_xl[0:3]  # (3,)
-            pos_error = torch.norm(current_pos[i] - ref_pos)  # scalar
-            if pos_error > self.config.get("pos_error_threshold", 0.25):  # 位置误差过大
-                self.pos_error_count[i] += 1
+        # for i in range(B):
+        #     next_idx = min(self.current_point_indices[i].item() + 1, len(self.ref_traj['Ref_xl']) - 1)
+        #     ref_xl = torch.tensor(self.ref_traj['Ref_xl'][next_idx], 
+        #                         dtype=torch.float32, device=self.device)
+        #     ref_pos = ref_xl[0:3]  # (3,)
+        #     pos_error = torch.norm(current_pos[i] - ref_pos)  # scalar
+        #     if pos_error > self.config.get("pos_error_threshold", 0.25):  # 位置误差过大
+        #         self.pos_error_count[i] += 1
 
-            if self.pos_error_count[i] >= self.config.get("pos_error_count", 5):  # 连续5步误差过大
-                done[i] = True
-                print(f"Env {i} done due to position error. Count: {self.pos_error_count[i].item()}")
-        print("pos error counts:", self.pos_error_count)
+        #     if self.pos_error_count[i] >= self.config.get("pos_error_count", 5):  # 连续5步误差过大
+        #         done[i] = True
+        #         print(f"Env {i} done due to position error. Count: {self.pos_error_count[i].item()}")
+        # print("pos error counts:", self.pos_error_count)
         # if done.all():
         #     print("Position errors:")
         # 2. 负载高度终止条件（负载高度小于等于0）
@@ -355,7 +368,11 @@ class RLGamesEnv:
             print("Max cable tensions:", self.cable.T.max(dim=1).values)
         # if done.all():
             # print("Max cable tensions:")
-            
+        # 时间终止条件
+        done |= (self.current_point_indices >= len(self.ref_traj['Ref_xl']) - 1)
+        # 离终点距离最大偏移终止条件
+        dis_to_end = torch.norm(current_pos - torch.tensor(self.ref_traj['Ref_xl'][-1][0:3], device=self.device), dim=1)
+        done |= (dis_to_end > 5.0)
         info = [{} for _ in range(B)]
         for i in range(B):
             if done[i]:
