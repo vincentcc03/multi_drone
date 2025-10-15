@@ -48,10 +48,9 @@ class RLGamesEnv:
         self.ref_traj = generate_complete_trajectory()
         self.payload_init_state = torch.from_numpy(self.ref_traj['Ref_xl'][0]).float()
         print("Payload initial state:", self.payload_init_state)
-        # 轨迹进展
+        # 轨迹进展 bool tensor
         self.traj_progress = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
 
-        
         # 可视化
         self.visualizer = DroneVisualization()
         self.ref_traj_vis = self.ref_traj['Ref_xl'][:, 0:3]  # 仅位置部分
@@ -178,6 +177,7 @@ class RLGamesEnv:
         # 检查哪些环境需要更新轨迹点
         update_mask = (self.step_counters % int(self.interval) == 0)
         self.current_point_indices[update_mask] += 1
+        self.traj_progress[update_mask] = 0  # 更新轨迹点的环境，进度归零
         print(f"Current point indices: {self.current_point_indices}")
         
        
@@ -266,10 +266,12 @@ class RLGamesEnv:
         reward = reward_pos + reward_vel + reward_quat + reward_omega
         
         
-        # # 进度奖励
-
-        # progress_reach = (self.current_point_indices > 20) & (pos_error < 0.05)
-        # reward += progress_reach.float() * 0.1
+        # 进度奖励
+        reach = pos_error < 0.05
+        self.traj_progress[reach] += 1
+        first_reach = self.traj_progress == 1
+        # 第一次到达了这个点
+        reward += first_reach.float() * 0.1
 
         # # 终止惩罚
         # reward += self.config.get("done_penalty", -1.0) * self.done.float()
@@ -278,16 +280,12 @@ class RLGamesEnv:
         # if pos_error.min() < 0.1:  # 到达目标附近
         #     reward += 100 * dt
     
-        # 2. 轨迹进展奖励
-        # traj_progress = self.current_point_indices.float() / 100
         # 动作平滑奖励
         # action_smoothness = -self.payload.v_dot.norm(dim=1) - self.payload.omega_dot.norm(dim=1)
         # progress_reward = self.config.get("progress_reward", 1)
         # reward += progress_reward * dt
         # reward += action_smoothness * dt
         # print(f"Progress reward: {progress_reward * dt}，action_smoothness: {action_smoothness.mean().item()*dt:.4f}")
-        # reward += traj_progress * dt
-        # print(f"Progress reward: {progress_reward * dt}, Traj progress: {(traj_progress * dt).mean().item():.4f}")
         print(f"Reward components : {reward_pos.mean().item():.6f}, {reward_vel.mean().item():.6f}, {reward_quat.mean().item():.6f}, {reward_omega.mean().item():.6f}")
         
         return reward
