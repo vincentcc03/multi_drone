@@ -15,7 +15,7 @@ from src.utils.plot_ppo import DroneVisualization
 from src.utils.log import TrainingLogger
 
 # 控制print输出的开关
-ENABLE_PRINT = False  # 设置为False即可关闭所有print
+ENABLE_PRINT = True  # 设置为False即可关闭所有print
 
 # 控制可视化的开关
 ENABLE_VISUALIZATION = True  # 设置为False即可关闭所有可视化
@@ -44,12 +44,14 @@ class RLGamesEnv:
         
         # 奖励log
         self.reward_log = torch.zeros(4, dtype=torch.float32, device=self.device)
+        self.end_pos_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.action_smoothness = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         # 参考轨迹
         self.ref_traj = generate_complete_trajectory()
         self.payload_init_state = torch.from_numpy(self.ref_traj['Ref_xl'][0]).float()
         print("Payload initial state:", self.payload_init_state)
         # 轨迹进展 bool tensor
-        self.traj_progress = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        self.traj_progress = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
         # 可视化
         self.visualizer = DroneVisualization()
@@ -57,6 +59,7 @@ class RLGamesEnv:
         self.payload_traj_list = []
         for _ in range(self.num_envs):
             self.payload_traj_list.append([])
+        self.env_done = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         
         
         # 绳子初始状态
@@ -94,6 +97,8 @@ class RLGamesEnv:
         # obs / act 空间
         self.obs_dim = 39
         self.act_dim = 4 * self.n_cables
+        self.action = torch.zeros(self.num_envs, 6 , 4 , dtype=torch.float32, device=self.device)
+        self.action_smoothness = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         
         # 无人机位置
         self.drone_pos = torch.zeros(self.num_envs, self.n_cables, 3, device=self.device)
@@ -107,10 +112,11 @@ class RLGamesEnv:
         reset_mask = self.done  # (B,) boolean tensor
         
         if reset_mask.any():
-            self.logger.log_step(self.step_counters.max().item(), self.reward.max().item(), self.reward_log[0].item(), self.reward_log[1].item(), self.reward_log[2].item(), self.reward_log[3].item())
+            
             # 向量化重置（性能更好）
             if reset_mask[0].item():  # 如果第一个环境需要重置，清空其轨迹记录器
                 self.draw_payload_traj_list()
+                self.logger.log_step(self.traj_progress.max().item(), self.reward.mean().item(), self.reward_log[0].item(), self.reward_log[1].item(), self.reward_log[2].item(), self.reward_log[3].item(),self.end_pos_reward[0].item(),self.action_smoothness[0].item())
             num_reset = reset_mask.sum().item()
             
             # 扩展初始状态到需要重置的环境数量
@@ -122,6 +128,8 @@ class RLGamesEnv:
             self.cable.state[reset_mask] = cable_init_expanded
             self.reward[reset_mask] = 0.0
             self.pos_error_count[reset_mask] = 0
+            self.traj_progress[reset_mask] = 0
+            self.env_done[reset_mask] = 0
             # 重置计数器
             # print("done:",reset_mask)
             
@@ -142,8 +150,10 @@ class RLGamesEnv:
         N = self.n_cables
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device)
         action = action.view(B, N, 4)
-        action *= 5
-        # print("Action:", action)
+        action *= 2
+        self.action_smoothness = -torch.norm(action - self.action, dim=(1,2))
+        self.action = action
+        print("Action:", action[0])
 
         # 动力学仿真
         self.cable.rk4_step(action)
@@ -151,10 +161,10 @@ class RLGamesEnv:
         q_l = self.payload.state[:, 6:10]
         R_l = quat_to_rot(q_l)
         input_force_torque = self.cable.compute_force_torque(R_l)
-        # print("Input force and torque to payload:", input_force_torque)
+        print("Input force and torque to payload:", input_force_torque[0])
         self.payload.rk4_step(input_force_torque)
-        
-        # print("Payload state:", self.payload.state)
+
+        print("Payload state:", self.payload.state[0])
         # 计算无人机位置
         self.compute_drone_positions()
         
@@ -164,33 +174,32 @@ class RLGamesEnv:
         self.done , info = self._check_done()
         reward = self._compute_reward(action)
         self.reward += reward
-        print("total_rewards:", self.reward)
+        # print("total_rewards:", self.reward)
         max_reward = self.reward.max().item()
-        print(f"max reward: {max_reward}")
+        # print(f"max reward: {max_reward}")
         self.reset()
         
         # 更新环境计数器
         self.step_counters += 1
         # 打印所有环境当前步数
-        print(f"Current step: {self.step_counters}")
+        # print(f"Current step: {self.step_counters}")
         
         # 检查哪些环境需要更新轨迹点
         update_mask = (self.step_counters % int(self.interval) == 0)
         self.current_point_indices[update_mask] += 1
-        self.traj_progress[update_mask] = 0  # 更新轨迹点的环境，进度归零
-        print(f"Current point indices: {self.current_point_indices}")
+        # print(f"Current point indices: {self.current_point_indices}")
         
        
         # 可视化
         current_time = self.step_counters[0].item() * self.dt
         # print(f"Current sim time: {current_time:.2f}s")
         if ENABLE_VISUALIZATION and current_time*100 % 4 == 0:
-            print(f"Visualizing at sim time: {current_time:.2f}s")
+            # print(f"Visualizing at sim time: {current_time:.2f}s")
             # self._visualize_current_state()
             self._record_payload_trajectories()
 
         obs = self._get_obs()
-
+        
         return obs, reward, self.done, info
 
     def get_number_of_agents(self):
@@ -244,21 +253,20 @@ class RLGamesEnv:
         
         # 位置奖励：指数衰减
         pos_scale = self.config.get("pos_reward_scale")  # 距离缩放系数
-        reward_pos = -self.pos_w * pos_error * dt * pos_scale
+        reward_pos = self.pos_w * torch.exp(-pos_error) * dt * pos_scale
         
         # 速度奖励：指数衰减
         vel_scale = self.config.get("vel_reward_scale")
-        reward_vel = -self.vel_w * vel_error * dt * vel_scale
+        reward_vel = self.vel_w * torch.exp(-vel_error) * dt * vel_scale
 
         # 姿态奖励：指数衰减
         quat_scale = self.config.get("quat_reward_scale")  # 四元数误差通常较小
-        reward_quat = -self.quat_w * quat_error * dt * quat_scale
+        reward_quat = self.quat_w * torch.exp(-quat_error) * dt * quat_scale
 
         # 角速度奖励：指数衰减
         omega_scale = self.config.get("omega_reward_scale")
-        reward_omega = -self.omega_w * omega_error * dt * omega_scale
+        reward_omega = self.omega_w * torch.exp(-omega_error) * dt * omega_scale
 
-        # 总奖励：正值，鼓励减小误差
         self.reward_log[0] = reward_pos.mean().item()
         self.reward_log[1] = reward_vel.mean().item()
         self.reward_log[2] = reward_quat.mean().item()
@@ -267,36 +275,49 @@ class RLGamesEnv:
         
         
         # 进度奖励
-        reach = pos_error < 0.05
-        self.traj_progress[reach] += 1
-        first_reach = self.traj_progress == 1
-        # 第一次到达了这个点
-        reward += first_reach.float() * 0.1
+        reach = pos_error < 0.1
+        last_progress = self.traj_progress.clone()
+        self.traj_progress[reach] = self.current_point_indices[reach]
+        first_reach = (self.traj_progress != last_progress) & (self.current_point_indices > 15)
+        # 第一次到达了这个
+        reward += first_reach.float() * 5
 
-        # # 终止惩罚
-        # reward += self.config.get("done_penalty", -1.0) * self.done.float()
+        # 终止惩罚
+        penalty_mask = (self.done & (self.env_done == 1) | (self.env_done == 6)|(self.env_done == 7))  # 因碰撞或拉力过大终止
+        reward += penalty_mask.float() * (self.traj_progress/100 - 1) * 10
+        # # 高度下降惩罚
+        # reward += (0.5-p_l[:, 2]) * -1 
+        # 终点距离奖励
+        # end_pos = torch.tensor(self.ref_traj['Ref_xl'][-1][0:3], device=self.device)
+        # dis_to_end = torch.norm(p_l - end_pos, dim=1)
+        # self.end_pos_reward = torch.exp(-dis_to_end) * dt * 100
+        # reward += self.end_pos_reward
         # 可选：添加额外奖励项
         # 1. 到达目标点的奖励
         # if pos_error.min() < 0.1:  # 到达目标附近
         #     reward += 100 * dt
     
         # 动作平滑奖励
-        # action_smoothness = -self.payload.v_dot.norm(dim=1) - self.payload.omega_dot.norm(dim=1)
+        self.action_smoothness *= 0.001
         # progress_reward = self.config.get("progress_reward", 1)
         # reward += progress_reward * dt
-        # reward += action_smoothness * dt
-        # print(f"Progress reward: {progress_reward * dt}，action_smoothness: {action_smoothness.mean().item()*dt:.4f}")
-        print(f"Reward components : {reward_pos.mean().item():.6f}, {reward_vel.mean().item():.6f}, {reward_quat.mean().item():.6f}, {reward_omega.mean().item():.6f}")
+        reward += self.action_smoothness
+        # print(f"action_smoothness: {self.action_smoothness[0].item():.4f}, end_pos_reward: {self.end_pos_reward[0].item():.4f}")
+        # print(f"Reward components : {reward_pos.mean().item():.6f}, {reward_vel.mean().item():.6f}, {reward_quat.mean().item():.6f}, {reward_omega.mean().item():.6f}")
         
         return reward
 
     def _check_done(self):
         B = self.num_envs
+        current_pos = self.payload.state[:, 0:3]   # (B, 3)
         # 每个环境一个 done 标志
         done = torch.zeros(B, dtype=torch.bool, device=self.device)
-
+        # 无人机位置约束
+        pay_load_height = current_pos[:, 2]  # (B, N_cables)
+        done |= (self.drone_pos[:, :, 2] < pay_load_height[:, None]).any(dim=1)
+        self.env_done[done] += 1
         # # 1. 位置误差终止条件 - 为每个环境使用独立的轨迹索引
-        current_pos = self.payload.state[:, 0:3]   # (B, 3)
+        
         # for i in range(B):
         #     next_idx = min(self.current_point_indices[i].item() + 1, len(self.ref_traj['Ref_xl']) - 1)
         #     ref_xl = torch.tensor(self.ref_traj['Ref_xl'][next_idx], 
@@ -316,8 +337,9 @@ class RLGamesEnv:
         payload_height = current_pos[:, 2]  # Z坐标 (B,)
         
         done |= (payload_height <= 0.0)
-        if (payload_height <= 0.0).any():
-            print("payload heights:", payload_height)
+        self.env_done[done] += 1
+        # if (payload_height <= 0.0).any():
+        #     # print("payload heights:", payload_height)
         # if done.all():
             # print("Payload heights:")
             # print("payload_state:", self.payload.state)
@@ -331,16 +353,18 @@ class RLGamesEnv:
             dist_to_obs = torch.norm(payload_xy - obs_pos, dim=2)  # (B, N)
             min_dist, _ = torch.min(dist_to_obs, dim=1)            # (B,)
             done |= (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance))
-            if (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance)).any():
-                print("Min distances from payload to obstacles:", min_dist)
+            # if (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance)).any():
+            #     print("Min distances from payload to obstacles:", min_dist)
+            self.env_done[done] += 1
             # 无人机与障碍物碰撞检测
             drone_xy = self.drone_pos[:, :, :2].unsqueeze(2)   # (B, N_cables, 1, 2)
             obs_pos = obs_pos.unsqueeze(1)                     # (B, 1, N, 2)
             dist_to_obs = torch.norm(drone_xy - obs_pos, dim=3)  # (B, N_cables, N)
             min_dist, _ = torch.min(dist_to_obs, dim=2)          # (B, N_cables)
             done |= (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any(dim=1)
-            if (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any():
-                print("Min distances from drones to obstacles:", min_dist)
+            # if (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any():
+            #     print("Min distances from drones to obstacles:", min_dist)
+            self.env_done[done] += 1
             # if done.all():
                 # print("Min distances from drones to obstacles:")
                 
@@ -362,15 +386,19 @@ class RLGamesEnv:
                     
         # 4. 绳子拉力终止条件
         done |= (self.cable.T > self.t_max).any(dim=1)
-        if (self.cable.T > self.t_max).any():
-            print("Max cable tensions:", self.cable.T.max(dim=1).values)
+        # if (self.cable.T > self.t_max).any():
+        #     print("Max cable tensions:", self.cable.T.max(dim=1).values)
+        self.env_done[done] += 1
         # if done.all():
             # print("Max cable tensions:")
         # 时间终止条件
         done |= (self.current_point_indices >= len(self.ref_traj['Ref_xl']) - 1)
+        self.env_done[done] += 1
         # 离终点距离最大偏移终止条件
         dis_to_end = torch.norm(current_pos - torch.tensor(self.ref_traj['Ref_xl'][-1][0:3], device=self.device), dim=1)
-        done |= (dis_to_end > 5.0)
+        done |= (dis_to_end > 4.3)
+        self.env_done[done] += 1
+            
         info = [{} for _ in range(B)]
         for i in range(B):
             if done[i]:
@@ -499,15 +527,63 @@ class RLGamesEnv:
                     color='green', marker='o', s=100, alpha=0.9, label='Start')
             ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], 
                     color='red', marker='s', s=100, alpha=0.9, label='End')
-            
+            # ===== 新增：在终点显示坐标 =====
+            end_x, end_y, end_z = traj[-1]
+            ax.text(end_x, end_y, end_z + 0.1,  # 稍微抬高一点避免重叠
+                    f"({end_x:.2f}, {end_y:.2f}, {end_z:.2f})", 
+                    color='red', fontsize=10, weight='bold')
             print(f"绘制轨迹：{len(traj)} 个点")
-        
+            # === 新增：绘制终点到地面的垂线 ===
+            ax.plot([end_x, end_x], [end_y, end_y], [0, end_z],
+                    color='gray', linestyle='--', linewidth=1.5, alpha=0.7)
+
+            # 在地面位置标一个点（投影点）
+            ax.scatter(end_x, end_y, 0, color='black', marker='x', s=60, label='End Projection')
+                
         # 绘制参考轨迹
         if hasattr(self, 'ref_traj_vis') and self.ref_traj_vis is not None:
             ref_traj = np.array(self.ref_traj_vis)
             ax.plot(ref_traj[:, 0], ref_traj[:, 1], ref_traj[:, 2], 
                 'k--', linewidth=2, alpha=0.6, label='Reference Trajectory')
+            # === ✅ 新增：绘制参考轨迹在地面的投影（虚线） ===
+            ax.plot(ref_traj[:, 0], ref_traj[:, 1], np.zeros_like(ref_traj[:, 2]),
+                    color='gray', linestyle='--', linewidth=1.5, alpha=0.5,
+                    label='Ref Trajectory Projection')
+         # === 新增：绘制起点和终点垂线 ===
+        ref_start_x, ref_start_y, ref_start_z = ref_traj[0]
+        ref_end_x, ref_end_y, ref_end_z = ref_traj[-1]
         
+        # 起点垂线
+        ax.plot([ref_start_x, ref_start_x], [ref_start_y, ref_start_y], [0, ref_start_z],
+                color='gray', linestyle='--', linewidth=1.2, alpha=0.7)
+        ax.scatter(ref_start_x, ref_start_y, 0, color='green', marker='^', s=60, label='Ref Start Projection')
+        
+        # 终点垂线
+        ax.plot([ref_end_x, ref_end_x], [ref_end_y, ref_end_y], [0, ref_end_z],
+                color='gray', linestyle='--', linewidth=1.2, alpha=0.7)
+        ax.scatter(ref_end_x, ref_end_y, 0, color='red', marker='v', s=60, label='Ref End Projection')
+        
+        # === 新增：绘制当前无人机位置 ===
+        if hasattr(self, 'drone_pos') and self.drone_pos is not None:
+            drone_positions = self.drone_pos[0].cpu().numpy()  # (N_cables, 3)
+            # 所有无人机使用相同的颜色和点标记
+            drone_color = 'orange'
+            
+            for i, pos in enumerate(drone_positions):
+                # 只在第一个无人机添加图例标签
+                label = 'Drones' if i == 0 else None
+                ax.scatter(pos[0], pos[1], pos[2], 
+                         color=drone_color, marker='o', s=120, alpha=0.9,
+                         label=label, edgecolors='black', linewidth=1)
+                
+                # 绘制无人机到负载的连线（绳子）
+                if len(self.payload_traj_list[0]) > 0:
+                    payload_pos = self.payload_traj_list[0][-1]  # 使用最后记录的负载位置
+                    ax.plot([pos[0], payload_pos[0]], 
+                           [pos[1], payload_pos[1]], 
+                           [pos[2], payload_pos[2]], 
+                           color=drone_color, linestyle='-', linewidth=1.5, alpha=0.6)
+
         # 绘制障碍物 - 使用竖直线表示
         if len(self.obstacle_pos) > 0:
             for i, obs_pos in enumerate(self.obstacle_pos.cpu().numpy()):
@@ -528,12 +604,19 @@ class RLGamesEnv:
                 # 在顶部也画一个圆
                 z_circle_top = np.full_like(x_circle, 3)
                 ax.plot(x_circle, y_circle, z_circle_top, 'r-', alpha=0.5, linewidth=1)
-        
+
         # 设置图形属性
         ax.set_xlabel('X (m)')
         ax.set_ylabel('Y (m)')
         ax.set_zlabel('Z (m)')
-        ax.set_title(f'Payload Trajectory - Environment 0 (Steps: {self.step_counters[0].item()})')
+        # 获取轨迹进展值
+        traj_progress_value = self.traj_progress[0].item()
+        env1_Reward = self.reward[0].item()
+        # 在标题中添加轨迹进展信息
+        ax.set_title(f'Payload Trajectory - Environment 0\n'
+                    f'Steps: {self.step_counters[0].item()} | '
+                    f'Progress: {traj_progress_value}/{len(self.ref_traj["Ref_xl"])-1}'
+                    f' | Reward: {env1_Reward:.2f}' f' | Env1 Done: {self.env_done[0]}', fontsize=14)
         ax.legend()
         ax.grid(True)
         
@@ -549,9 +632,9 @@ class RLGamesEnv:
             ref_range = np.max(np.abs(self.ref_traj_vis))
             max_range = max(max_range, ref_range)
         
-        ax.set_xlim([-max_range, max_range])
-        ax.set_ylim([-max_range, max_range])
-        ax.set_zlim([0, max_range])
+        ax.set_xlim([-1,3])
+        ax.set_ylim([-1,3])
+        ax.set_zlim([0, 1])
         
         # 保存图片
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

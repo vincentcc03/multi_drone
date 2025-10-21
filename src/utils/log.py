@@ -54,20 +54,20 @@ class TrainingLogger:
             f.write(f"Position Error Count: {pos_error_count}\n")
             f.write(f"Progress Reward: {progress_reward}\n")
             f.write("-" * 50 + "\n")
-            f.write("Current_Step,Max_Reward,Position,Velocity,Quaternion,Angular_Velocity,Timestamp\n")
-    
-    def log_step(self, current_step, max_reward,pos,vel,quat,omega):
+            f.write("max_progress,env1_Reward,Position,Velocity,Quaternion,Angular_Velocity,Timestamp,End_Position_Reward,Action_Smoothness\n")
+
+    def log_step(self, max_progress, env1_reward, pos, vel, quat, omega, end_pos_reward,action_smoothness):
         """
         记录单步训练数据
         
         Args:
-            current_step: 当前步数
+            max_progress: 当前步数
             max_reward: 最大奖励
         """
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(self.log_file, 'a') as f:
-            f.write(f"{current_step},{max_reward:.6f},{timestamp},{pos},{vel},{quat},{omega}\n")
-    
+            f.write(f"{max_progress},{env1_reward:.6f},{timestamp},{pos},{vel},{quat},{omega},{end_pos_reward:.6f},{action_smoothness:.6f}\n")
+
     def log_episode(self, episode, max_reward, episode_reward=None):
         """
         记录回合数据
