@@ -19,19 +19,19 @@ params:
     name: actor_critic        # 网络名称，actor-critic 架构
     separate: False           # 是否分开 actor/critic 网络（False 表示共享网络）
     space:
-      continuous:
-        mu_activation: tanh          # 均值线性输出
+      continuous: 
+        mu_activation: None          # 均值线性输出
         sigma_activation: None       # log_std线性输出
-        mu_init:
+        mu_init: 
           name: default
         sigma_init:
           name: const_initializer
-          val: -1
-        fixed_sigma: False
+          val: -1 
+        fixed_sigma: True
         sigma_max: 1.0
         sigma_min: -3.0
     mlp:
-      units: [512,256,128]   # MLP 每一层的神经元数
+      units: [512,256,128]   # MLP 每一层的神经元数 
       # units: [512, 256, 128] # 可选的更大规模网络
       activation: elu         # 激活函数，ELU
       d2rl: False             # 是否启用 D2RL (Deep Dense Reinforcement Learning) 技巧
@@ -52,9 +52,9 @@ params:
     device_name: 'cuda:0'     # 同上（有时日志会用）
     multi_gpu: False          # 是否启用多 GPU 训练
     ppo: True                 # 是否使用 PPO（True = A2C + clipping）
-    mixed_precision: False    # 是否启用混合精度（fp16/bf16）
+    mixed_precision: False    # 是否启用混合精度（fp16 /bf16）
     normalize_input: True     # 是否归一化 observation
-    normalize_value: True     # 是否归一化 critic 的 value
+    normalize_value: False
     value_bootstrap: True     # 是否允许 bootstrap value
     num_actors: 16            # 并行环境数量
     horizon_length: 128        # 每次收集的 rollout 长度
@@ -67,16 +67,16 @@ params:
     max_epochs: 30000           # 最大训练轮数
     critic_coef: 1            # value loss 系数
     clip_value: True          # 是否对 value 误差做 clip
-    bounds_loss_coef: 0.02  # 动作越界的惩罚系数
+    bounds_loss_coef: 1 # 动作越界的惩罚系数
     reward_shaper:
-      scale_value: 10    # 奖励缩放因子
+      scale_value: 1    # 奖励缩放因子
     lr_schedule: adaptive     # 学习率调度方式（adaptive = 自适应）
-    kl_threshold: 0.01       # KL 散 度阈值（自适应学习率用）
+    kl_threshold: 0.03       # KL 散 度阈值（自适应学习率用）
     grad_norm: 1.0            # 梯度裁剪上限
-    entropy_coef: 0.003        # 策略熵正则系数（0 = 不鼓励探索）
+    entropy_coef: 0.005        # 策略熵正则系数（0 = 不鼓励探索）
     truncate_grads: True      # 是否截断梯度
     save_best_after: 50       # 第 50 轮后才开始保存 best 模型
-    save_frequency: 25        # 每隔 25 轮保存一次模型
+    save_frequency: 1        # 每隔 1 轮保存一次模型
     # score_to_win: 200       # 达到该分数算成
     print_stats: True         # 是否打印训练统计信息
     train_dir: runs           # 训练结果目录
@@ -85,7 +85,7 @@ params:
     # games_to_track: 100       # 平滑奖励的采样窗口
     # use_diagnost : False
     # ics: False    # 是否开启诊断模式    use_action_masks: False   # 是否启用动作掩码（适合部分动作不可用的情况）
-    # is_train: True            # 是否训练 模式（False = 测试模式）
+    # is_train: True            # 是否训练 模式（False = 测试模式） 
     # schedule_type: legacy     # 学习率调度类型
     normalize_advantage: True # 是否标准化 advantage
     # normalize_rms_advantage: False # 是否用 RMSNorm 来归一化 advantage
