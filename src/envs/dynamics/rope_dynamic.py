@@ -28,9 +28,10 @@ class CableDynamicsSimBatch:
         # (B, n, 8): [dir(3), omega(3), T, T_dot]
         self.state = torch.zeros(self.envs, self.n_cables, 8, device=self.device)
         dir_init = cfg.get("cable_initial_dirs", [[0, 0, 1]] * self.n_cables)  # (n,3)
-        for i in range(self.n_cables):
-            self.state[:, i, 6] = cfg.get("cable_initial_tensions", 2)  # 初始张力 (N)
-            self.state[:, i, 0:3] = torch.tensor(dir_init[i], device=self.device)
+        # 圆形分布
+        angles = torch.arange(self.n_cables, device=self.device) * (2 * torch.pi / self.n_cables)
+        r_i = torch.stack([rl * torch.cos(angles), rl * torch.sin(angles), torch.zeros_like(angles)], dim=1)
+        self.r_i = r_i
 
         # 便捷成员变量
         self.dir = self.state[:, :, 0:3]      # (B, n, 3)

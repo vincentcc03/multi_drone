@@ -1,5 +1,5 @@
-envs: 16
-dt: 0.0025
+envs: 4096
+dt: 0.005
 steps: 1000 # 动力学仿真脚本使用
 device: cuda
 
@@ -29,13 +29,13 @@ obstacle_r: 0.5           # 障碍物半径 (m)
 # 在你的config文件中添加这些参数
 pos_weight: 1.5          # 位置权重
 vel_weight: 0.4          # 速度权重
-quat_weight: 0       # 姿态权重
-omega_weight: 0      # 角速度权重
+quat_weight: 1       # 姿态权重
+omega_weight: 0.1      # 角速度权重
 
 pos_reward_scale: 1    # 位置误差缩放（值越大，对误差越敏感）
 vel_reward_scale: 1   # 速度误差缩放
-quat_reward_scale: 0.1  # 姿态误差缩放
-omega_reward_scale: 0.1  # 角速度误差缩放
+quat_reward_scale: 1  # 姿态误差缩放
+omega_reward_scale: 1  # 角速度误差缩放
 
 progress_reward: 0.2     # 轨迹进展奖励
 collision_penalty: -10.0 # 碰撞惩罚
