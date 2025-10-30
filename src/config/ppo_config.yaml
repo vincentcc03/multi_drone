@@ -1,100 +1,84 @@
 params:
-  seed: 42                 # 随机数种子，保证实验可复现
+  seed: 42
 
-  # 环境相关设置
   env:
-  #   clip_observations: 10.0   # 对 observation 做裁剪，超过 ±10 的值会被截断
-    clip_actions: 1.0         # 对 action 做裁剪，超过 ±1 的值会被截断
+    clip_actions: 1.0
 
-  # 算法选择
   algo:
-    name: a2c_continuous      # 算法名称（这里是 rl_games 内部的 continuous A2C / PPO 实现）
+    name: a2c_continuous      # rl_games 内部的 PPO/A2C 实现
 
-  # 模型定义
   model:
-    name: continuous_a2c_logstd  # 使用连续动作空间的 A2C 模型，带 logstd
+    name: continuous_a2c_logstd
 
-  # 神经网络结构
   network:
-    name: actor_critic        # 网络名称，actor-critic 架构
-    separate: False           # 是否分开 actor/critic 网络（False 表示共享网络）
+    name: actor_critic
+    separate: False
     space:
-      continuous: 
-        mu_activation: None          # 均值线性输出
-        sigma_activation: None       # log_std线性输出
-        mu_init: 
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
           name: default
         sigma_init:
           name: const_initializer
-          val: -1 
+          val: -1
         fixed_sigma: True
         sigma_max: 1.0
         sigma_min: -3.0
     mlp:
-      units: [512,256,128]   # MLP 每一层的神经元数 
-      # units: [512, 256, 128] # 可选的更大规模网络
-      activation: elu         # 激活函数，ELU
-      d2rl: False             # 是否启用 D2RL (Deep Dense Reinforcement Learning) 技巧
+      units: [1024, 512, 256, 128]   # ✅ 与论文一致
+      activation: relu               # 🔄 改为 ReLU（论文用 ReLU）
+      d2rl: False
       initializer:
-        name: default         # 权重初始化方式
+        name: default
       regularizer:
-        name: None            # 权重正则化方式（这里禁用）
+        name: None
 
-  # 模型加载设置
-  load_checkpoint: False      # 是否从 checkpoint 恢复
-  load_path: ''               # checkpoint 文件路径
+  load_checkpoint: False
+  load_path: ''
 
-  # PPO 配置
   config:
-    name: lift                # 任务名称 
-    env_name: rlgpu           # 注册的环境名称
-    device: 'cuda:0'          # 使用的设备
-    device_name: 'cuda:0'     # 同上（有时日志会用）
-    multi_gpu: False          # 是否启用多 GPU 训练
-    ppo: True                 # 是否使用 PPO（True = A2C + clipping）
-    mixed_precision: False    # 是否启用混合精度（fp16 /bf16）
-    normalize_input: True     # 是否归一化 observation
-    normalize_value: False
-    value_bootstrap: True     # 是否允许 bootstrap value
-    num_actors: 16            # 并行环境数量
-    horizon_length: 128        # 每次收集的 rollout 长度
-    minibatch_size: 256       # 每个小批量大小
-    mini_epochs: 5            # 每次更新的迭代次数
-    learning_rate: 3e-4       # 初始学习率
-    e_clip: 0.2               # PPO 的 clip ε
-    gamma: 0.99               # 折扣因子 γ
-    tau: 0.95                 # GAE(λ) 中的 λ
-    max_epochs: 30000           # 最大训练轮数
-    critic_coef: 1            # value loss 系数
-    clip_value: True          # 是否对 value 误差做 clip
-    bounds_loss_coef: 1 # 动作越界的惩罚系数
+    name: lift
+    env_name: rlgpu
+    device: 'cuda:0'
+    device_name: 'cuda:0'
+    multi_gpu: False
+    ppo: True
+    mixed_precision: False
+    normalize_input: True
+    normalize_value: True          # ✅ 启用 value 归一化
+    value_bootstrap: True
+
+    num_actors: 4096               # 🔼 提升并行环境数量（论文中为 4096）
+    horizon_length: 128            # 🔽 改为论文中的 rollout 长度 128
+    minibatch_size: 1024
+    mini_epochs: 5
+    max-steps: 1000000000            # 增加总训练步数以匹配论文训练时长
+    learning_rate: 5e-4            # 🔼 改为论文 actor LR（critic 同步）
+    lr_schedule: constant          # 🔄 改为 constant（论文未使用 adaptive）
+
+    e_clip: 0.1                    # 🔽 PPO clip 区间 ε
+    gamma: 0.99
+    tau: 0.95                      # GAE λ
+
+    critic_coef: 1.0
+    clip_value: 0.1                # ✅ 显式指定 value clip 值
+    bounds_loss_coef: 1.0
+
     reward_shaper:
-      scale_value: 1    # 奖励缩放因子
-    lr_schedule: adaptive     # 学习率调度方式（adaptive = 自适应）
-    kl_threshold: 0.03       # KL 散 度阈值（自适应学习率用）
-    grad_norm: 1.0            # 梯度裁剪上限
-    entropy_coef: 0.005        # 策略熵正则系数（0 = 不鼓励探索）
-    truncate_grads: True      # 是否截断梯度
-    save_best_after: 50       # 第 50 轮后才开始保存 best 模型
-    save_frequency: 1        # 每隔 1 轮保存一次模型
-    # score_to_win: 200       # 达到该分数算成
-    print_stats: True         # 是否打印训练统计信息
-    train_dir: runs           # 训练结果目录
-    log_path: runs/           # 日志保存路径
-    network_path: ./nn/       # 网络模型保存路径
-    # games_to_track: 100       # 平滑奖励的采样窗口
-    # use_diagnost : False
-    # ics: False    # 是否开启诊断模式    use_action_masks: False   # 是否启用动作掩码（适合部分动作不可用的情况）
-    # is_train: True            # 是否训练 模式（False = 测试模式） 
-    # schedule_type: legacy     # 学习率调度类型
-    normalize_advantage: True # 是否标准化 advantage
-    # normalize_rms_advantage: False # 是否用 RMSNorm 来归一化 advantage
-    # adv_rms_momentum: 0.5     # RMS advantage 动量参数
-    # central_value_config: null # 多智能体训练时的 central value 配置
-    # self_play: False          # 是否启用自博弈
-    # self_play_config: null    # 自博弈参数
-    # features:
-    #   observer: null          # 特征提取器配置
-    # use_smooth_clamp: False   # 是否平滑截断
+      scale_value: 1
 
+    grad_norm: 1.0
+    entropy_coef: 0.001            # 🔽 降低熵正则系数以匹配论文
+    truncate_grads: True
 
+    kl_threshold: 0.0              # 🔽 禁用 adaptive KL 调节
+
+    save_best_after: 50
+    save_frequency: 1
+    print_stats: True
+    train_dir: runs
+    log_path: runs/
+    network_path: ./nn/
+
+    normalize_advantage: True

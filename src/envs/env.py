@@ -15,10 +15,10 @@ from src.utils.plot_ppo import DroneVisualization
 from src.utils.log import TrainingLogger
 
 # 控制print输出的开关
-ENABLE_PRINT = True  # 设置为False即可关闭所有print
+ENABLE_PRINT = False  # 设置为False即可关闭所有print
 
 # 控制可视化的开关
-ENABLE_VISUALIZATION = True  # 设置为False即可关闭所有可视化
+ENABLE_VISUALIZATION = False  # 设置为False即可关闭所有可视化
 
 # 重定义print函数
 if not ENABLE_PRINT:
@@ -47,14 +47,15 @@ class RLGamesEnv:
         self.cable = CableDynamicsSimBatch()
         self.v_dot = self.payload.v_dot 
         self.omega_dot = self.payload.omega_dot
-        
+        self.r_g = self.payload.r_g
         # 奖励log
         self.reward_log = torch.zeros(4, dtype=torch.float32, device=self.device)
         self.end_pos_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.action_smoothness = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         # 参考轨迹
         self.ref_traj = generate_complete_trajectory()
-        self.payload_init_state = torch.from_numpy(self.ref_traj['Ref_xl'][0]).float()
+        self.ref_xl = torch.as_tensor(self.ref_traj['Ref_xl'], dtype=torch.float32, device=self.device)
+        self.payload_init_state = self.ref_xl[0].clone()
         print("Payload initial state:", self.payload_init_state)
         # 轨迹进展 bool tensor
         self.traj_progress = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -101,9 +102,9 @@ class RLGamesEnv:
         
 
         # obs / act 空间
-        self.obs_dim = 39
+        self.obs_dim = 3 + 6 + 13 + 1  # rg(3) + 障碍物(6) + 参考负载状态(13) + 无人机半径(1)
         self.act_dim = 4 * self.n_cables
-        self.action = torch.zeros(self.num_envs, 6 , 4 , dtype=torch.float32, device=self.device)
+        self.action = torch.zeros(self.num_envs, 6, 4, dtype=torch.float32, device=self.device)
         self.action_smoothness = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         
         # 无人机位置
@@ -118,9 +119,9 @@ class RLGamesEnv:
         reset_mask = self.done  # (B,) boolean tensor
         
         if reset_mask.any():
-            self.logger.log_step(self.traj_progress.max().item(), self.reward.mean().item(), self.reward_log[0].item(), self.reward_log[1].item(), self.reward_log[2].item(), self.reward_log[3].item(),self.end_pos_reward[0].item(),self.action_smoothness[0].item())
             # 向量化重置（性能更好）
             if reset_mask[0].item():  # 如果第一个环境需要重置，清空其轨迹记录器
+                self.logger.log_step(self.traj_progress.max().item(), self.reward.mean().item(), self.reward_log[0].item(), self.reward_log[1].item(), self.reward_log[2].item(), self.reward_log[3].item(),self.end_pos_reward[0].item(),self.action_smoothness[0].item())
                 self.draw_payload_traj_list()
                 
             num_reset = reset_mask.sum().item()
@@ -197,7 +198,7 @@ class RLGamesEnv:
         reward = self._compute_reward(action)
         self.reward += reward
         # print("total_rewards:", self.reward)
-        max_reward = self.reward.max().item()
+        # max_reward = self.reward.max().item()
         # print(f"max reward: {max_reward}")
         self.reset()
         
@@ -205,7 +206,7 @@ class RLGamesEnv:
         
        
         # 可视化
-        current_time = self.step_counters[0].item() * self.dt
+        current_time = self.step_counters[0] * self.dt
         # print(f"Current sim time: {current_time:.2f}s")
         if ENABLE_VISUALIZATION and current_time*100 % 4 == 0:
             # print(f"Visualizing at sim time: {current_time:.2f}s")
@@ -236,12 +237,14 @@ class RLGamesEnv:
         q_l = state[:, 6:10]        # (B, 4)
         omega_l = state[:, 10:13]   # (B, 3)
 
-        # 参考状态 - 为每个环境使用独立的轨迹索引
-        ref_xl_batch = torch.zeros(B, 13, dtype=torch.float32, device=self.device)
-        for i in range(B):
-            next_idx = min(self.current_point_indices[i].item() + 1, len(self.ref_traj['Ref_xl']) - 1)
-            ref_xl_batch[i] = torch.tensor(self.ref_traj['Ref_xl'][next_idx], dtype=torch.float32, device=self.device)
-        
+          # (T, 13)
+        T = self.ref_xl.shape[0]
+
+        # === 2. 批量计算索引 ===
+        next_indices = torch.clamp(self.current_point_indices + 1, max=T - 1)  # (B,)
+
+        # === 3. 批量 gather 对应轨迹点 ===
+        ref_xl_batch = self.ref_xl[next_indices]  # (B, 13)
         p_l_ref = ref_xl_batch[:, 0:3]
         v_l_ref = ref_xl_batch[:, 3:6]
         q_l_ref = ref_xl_batch[:, 6:10]
@@ -267,24 +270,24 @@ class RLGamesEnv:
         
         # 位置奖励：指数衰减
         pos_scale = self.config.get("pos_reward_scale")  # 距离缩放系数
-        reward_pos = self.pos_w * (self.last_pos_error - pos_error) * pos_scale
+        reward_pos = self.pos_w * torch.exp(-1.5*pos_error) * pos_scale
         
         # 速度奖励：指数衰减
         vel_scale = self.config.get("vel_reward_scale")
-        reward_vel = self.vel_w * (self.last_vel_error - vel_error) * vel_scale
+        reward_vel = self.vel_w * torch.exp(-1.5*vel_error) * vel_scale
 
         # 姿态奖励：指数衰减
         quat_scale = self.config.get("quat_reward_scale")  # 四元数误差通常较小
-        reward_quat = self.quat_w * (self.last_quat_error - quat_error) * quat_scale
+        reward_quat = self.quat_w * torch.exp(-1.5*quat_error) * quat_scale
 
         # 角速度奖励：指数衰减
         omega_scale = self.config.get("omega_reward_scale")
-        reward_omega = self.omega_w * (self.last_omega_error - omega_error) * omega_scale
+        reward_omega = self.omega_w * torch.exp(-1.5*omega_error) * omega_scale
 
-        self.reward_log[0] = reward_pos.mean().item()
-        self.reward_log[1] = reward_vel.mean().item()
-        self.reward_log[2] = reward_quat.mean().item()
-        self.reward_log[3] = reward_omega.mean().item()
+        self.reward_log[0] = reward_pos.mean()
+        self.reward_log[1] = reward_vel.mean()
+        self.reward_log[2] = reward_quat.mean()
+        self.reward_log[3] = reward_omega.mean()
         reward = reward_pos + reward_vel + reward_quat + reward_omega
         # self.last_pos_error = pos_error.clone()
         # self.last_vel_error = vel_error.clone()
@@ -432,48 +435,31 @@ class RLGamesEnv:
         # done |= (dis_to_end > 4.3)
         # self.env_done[done] += 1
             
-        info = [{} for _ in range(B)]
-        for i in range(B):
-            if done[i]:
-                info[i]["episode"] = {
-                    "step": self.step_counters[i].item(),
-                    "total_reward": self.reward[i].item()  # 注意这里要用累计奖励
-                }
+        info = []
         return done, info
 
     def _get_obs(self):
         B = self.num_envs
 
-        # 1. rg_mag (B, 1)
-        r_g_mag = self.payload.r_g.norm().item()
-        r_g_mag = torch.full((B, 1), r_g_mag, device=self.device)  # (B, 1)
-        # 2. 障碍物信息 (B, 6) - 假设最多2个障碍物
-        obstacle_info = torch.zeros(B, 6, device=self.device)
-        for i, pos in enumerate(self.obstacle_pos[:2]):  # 最多取前2个
-            obstacle_info[:, i*3:(i+1)*3] = torch.cat([
-                pos, torch.tensor([self.obstacle_r], device=self.device)
-            ]).unsqueeze(0).expand(B, 3)
+        r_g = self.r_g.unsqueeze(0).expand(B, -1).to(self.device)
+        # 2️⃣ 障碍物信息 (B, 6) - 最多2个障碍物
+        pad_obs = torch.zeros(2, 2, device=self.device)
+        pad_obs[:2] = self.obstacle_pos[:2]
+        obs_r = torch.full((2, 1), self.obstacle_r, device=self.device)
+        obstacle_info = torch.cat([pad_obs, obs_r], dim=1).reshape(1, -1).expand(B, -1)
 
-        # 3. ref_xl (B, 13) 和 ref_ul (B, 18) - 为每个环境使用独立的轨迹索引
-        ref_xl_batch = torch.zeros(B, 13, dtype=torch.float32, device=self.device)
-        ref_ul_batch = torch.zeros(B, 18, dtype=torch.float32, device=self.device)
-        
-        for i in range(B):
-            next_idx = min(self.current_point_indices[i].item() + 1, len(self.ref_traj['Ref_xl']) - 1)
-            curr_idx = min(self.current_point_indices[i].item(), len(self.ref_traj['Ref_ul']) - 1)
-            
-            ref_xl_batch[i] = torch.tensor(self.ref_traj['Ref_xl'][next_idx], dtype=torch.float32, device=self.device)
-            ref_ul_batch[i] = torch.tensor(self.ref_traj['Ref_ul'][curr_idx], dtype=torch.float32, device=self.device)
-        
-        ref_xl = ref_xl_batch
-        ref_ul = ref_ul_batch
+        # 3️⃣ ref_xl 和 ref_ul 批量索引
+        T_xl = self.ref_xl.shape[0]
+        next_idx = torch.clamp(self.current_point_indices + 1, max=T_xl - 1)
+        ref_xl_batch = self.ref_xl[next_idx]  # (B, 13)
 
-        # 4. drone_radius (B, 1)
+        # 4️⃣ drone_radius (B, 1)
         drone_radius = torch.full((B, 1), float(self.drone_radius), device=self.device)
 
-        # 拼接
-        obs = torch.cat([r_g_mag, obstacle_info, ref_xl, ref_ul, drone_radius], dim=1)  # (B, 1+6+13+18+1=39)
+        # 5️⃣ 拼接观测向量
+        obs = torch.cat([r_g, obstacle_info, ref_xl_batch, drone_radius], dim=1)
         return obs
+
 
     def render(self, mode="human"):
         pass
