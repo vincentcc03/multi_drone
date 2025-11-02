@@ -39,6 +39,25 @@ params:
       regularizer:
         name: None
 
+    # === Actor 网络 ===
+    actor_mlp:
+      units: [1024, 512, 256, 128]
+      activation: relu
+      d2rl: False
+      initializer:
+        name: default
+      regularizer:
+        name: None
+
+    # === Critic 网络 ===
+    critic_mlp:
+      units: [1024, 512, 256, 128]
+      activation: relu
+      d2rl: False
+      initializer:
+        name: default
+      regularizer:
+        name: None
 
   load_checkpoint: False
   load_path: ''
@@ -66,19 +85,20 @@ params:
 
     # === Learning rate ===
     learning_rate: 5e-4      # Actor LR
+    critic_lr: 1e-4          # ✅ 独立 Critic LR
     lr_schedule: constant
 
     # === PPO hyperparams ===
-    e_clip: 0.2
+    e_clip: 0.1
     gamma: 0.99
     tau: 0.95
-    critic_coef: 0.8
+    critic_coef: 1.0
     clip_value: 0.1
     bounds_loss_coef: 1.0
     grad_norm: 1.0
     entropy_coef: 0.001
     truncate_grads: True
-    kl_threshold: 0.2
+    kl_threshold: 0.0
 
     # === Reward shaper ===
     reward_shaper:
