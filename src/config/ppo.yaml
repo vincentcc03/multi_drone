@@ -1,0 +1,114 @@
+params:
+  seed: 42
+
+  env:
+    clip_actions: 1.0
+    # ✅ 若你在环境里实现了 observation history stacking，这里无需额外设置
+    # history_length: 3   # (若环境支持该参数可开启)
+
+  algo:
+    name: a2c_continuous   # rl_games 的 PPO / A2C 实现
+
+  model:
+    name: continuous_a2c_logstd
+
+  network:
+    name: actor_critic
+    separate: True          # ✅ 分离 actor/critic 网络（centralized critic）
+
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: default
+        sigma_init:
+          name: const_initializer
+          val: -1
+        fixed_sigma: True   # ✅ 固定 log_std，与论文一致
+        sigma_max: 1.0
+        sigma_min: -3.0
+
+    # 兼容 rl_games 老接口：添加 mlp 字段（用于 network_builder）
+    mlp:
+      units: [1024, 512, 256, 128]
+      activation: relu
+      d2rl: False
+      initializer:
+        name: default
+      regularizer:
+        name: None
+
+    # === Actor 网络 ===
+    actor_mlp:
+      units: [1024, 512, 256, 128]
+      activation: relu
+      d2rl: False
+      initializer:
+        name: default
+      regularizer:
+        name: None
+
+    # === Critic 网络 ===
+    critic_mlp:
+      units: [1024, 512, 256, 128]
+      activation: relu
+      d2rl: False
+      initializer:
+        name: default
+      regularizer:
+        name: None
+
+  load_checkpoint: False
+  load_path: ''
+
+  config:
+    name: marl_payload
+    env_name: rlgpu
+    device: 'cuda:0'
+    multi_gpu: False
+    ppo: True
+    mixed_precision: False
+
+    # === Normalization ===
+    normalize_input: True
+    normalize_value: True
+    value_bootstrap: True
+    normalize_advantage: True
+
+    # === Parallelism & rollout ===
+    num_actors: 4096
+    horizon_length: 128
+    minibatch_size: 1024
+    mini_epochs: 5
+    max_epochs: 10000
+
+    # === Learning rate ===
+    learning_rate: 5e-4      # Actor LR
+    critic_lr: 1e-4          # ✅ 独立 Critic LR
+    lr_schedule: constant
+
+    # === PPO hyperparams ===
+    e_clip: 0.1
+    gamma: 0.99
+    tau: 0.95
+    critic_coef: 1.0
+    clip_value: 0.1
+    bounds_loss_coef: 1.0
+    grad_norm: 1.0
+    entropy_coef: 0.001
+    truncate_grads: True
+    kl_threshold: 0.0
+
+    # === Reward shaper ===
+    reward_shaper:
+      scale_value: 1.0
+
+
+    # === Logging / saving ===
+    save_best_after: 50
+    save_frequency: 1
+    print_stats: True
+    train_dir: runs
+    log_path: runs/
+    network_path: ./nn/

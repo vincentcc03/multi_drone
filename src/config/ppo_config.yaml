@@ -3,16 +3,19 @@ params:
 
   env:
     clip_actions: 1.0
+    # ✅ 若你在环境里实现了 observation history stacking，这里无需额外设置
+    # history_length: 3   # (若环境支持该参数可开启)
 
   algo:
-    name: a2c_continuous      # rl_games 内部的 PPO/A2C 实现
+    name: a2c_continuous   # rl_games 的 PPO / A2C 实现
 
   model:
     name: continuous_a2c_logstd
 
   network:
     name: actor_critic
-    separate: False
+    separate: True          # ✅ 分离 actor/critic 网络（centralized critic）
+
     space:
       continuous:
         mu_activation: None
@@ -22,63 +25,70 @@ params:
         sigma_init:
           name: const_initializer
           val: -1
-        fixed_sigma: True
+        fixed_sigma: True   # ✅ 固定 log_std，与论文一致
         sigma_max: 1.0
         sigma_min: -3.0
+
+    # 兼容 rl_games 老接口：添加 mlp 字段（用于 network_builder）
     mlp:
-      units: [1024, 512, 256, 128]   # ✅ 与论文一致
-      activation: relu               # 🔄 改为 ReLU（论文用 ReLU）
+      units: [1024, 512, 256, 128]
+      activation: relu
       d2rl: False
       initializer:
         name: default
       regularizer:
         name: None
 
+
   load_checkpoint: False
   load_path: ''
 
   config:
-    name: lift
+    name: marl_payload
     env_name: rlgpu
     device: 'cuda:0'
-    device_name: 'cuda:0'
     multi_gpu: False
     ppo: True
     mixed_precision: False
-    normalize_input: True
-    normalize_value: True          # ✅ 启用 value 归一化
-    value_bootstrap: True
 
-    num_actors: 4096               # 🔼 提升并行环境数量（论文中为 4096）
-    horizon_length: 128            # 🔽 改为论文中的 rollout 长度 128
+    # === Normalization ===
+    normalize_input: True
+    normalize_value: True
+    value_bootstrap: True
+    normalize_advantage: True
+
+    # === Parallelism & rollout ===
+    num_actors: 4096
+    horizon_length: 128
     minibatch_size: 1024
     mini_epochs: 5
-    max-steps: 1000000000            # 增加总训练步数以匹配论文训练时长
-    learning_rate: 5e-4            # 🔼 改为论文 actor LR（critic 同步）
-    lr_schedule: constant          # 🔄 改为 constant（论文未使用 adaptive）
+    max_epochs: 10000
 
-    e_clip: 0.1                    # 🔽 PPO clip 区间 ε
+    # === Learning rate ===
+    learning_rate: 5e-4      # Actor LR
+    lr_schedule: constant
+
+    # === PPO hyperparams ===
+    e_clip: 0.2
     gamma: 0.99
-    tau: 0.95                      # GAE λ
-
-    critic_coef: 1.0
-    clip_value: 0.1                # ✅ 显式指定 value clip 值
+    tau: 0.95
+    critic_coef: 0.8
+    clip_value: 0.1
     bounds_loss_coef: 1.0
-
-    reward_shaper:
-      scale_value: 1
-
     grad_norm: 1.0
-    entropy_coef: 0.001            # 🔽 降低熵正则系数以匹配论文
+    entropy_coef: 0.001
     truncate_grads: True
+    kl_threshold: 0.2
 
-    kl_threshold: 0.0              # 🔽 禁用 adaptive KL 调节
+    # === Reward shaper ===
+    reward_shaper:
+      scale_value: 1.0
 
+
+    # === Logging / saving ===
     save_best_after: 50
     save_frequency: 1
     print_stats: True
     train_dir: runs
     log_path: runs/
     network_path: ./nn/
-
-    normalize_advantage: True
