@@ -15,21 +15,34 @@ class CableDynamicsSimBatch:
 
         self.n_cables = cfg.get("rope_num")
         rl = cfg.get("rl")  # 半径
-        alpha = 2 * np.pi / self.n_cables
         r_i = []
+        dir_init = []
+        alpha = 2 * math.pi / self.n_cables
+        theta = math.asin(0.25)
+
         for i in range(self.n_cables):
+            # 1️⃣ 挂载点位置
             x = rl * math.cos(i * alpha)
             y = rl * math.sin(i * alpha)
             z = 0
             r_i.append([x, y, z])
-        self.r_i = torch.tensor(r_i, dtype=torch.float32, device=self.device)  # (n, 3)
+
+            # 2️⃣ 初始方向：与竖直方向夹角30°，并与圆心连线共面
+            dir_vec = [
+                math.sin(theta) * math.cos(i * alpha),  # 指向圆心的水平分量
+                math.sin(theta) * math.sin(i * alpha),
+                math.cos(theta)                         # 向下分量
+            ]
+            dir_init.append(dir_vec)
+
+        self.r_i = torch.tensor(r_i, dtype=torch.float32, device=self.device)       # (n, 3)
+        dir_init = torch.tensor(dir_init, dtype=torch.float32, device=self.device)  # (n, 3)
 
         # 初值
         # (B, n, 8): [dir(3), omega(3), T, T_dot]
         self.state = torch.zeros(self.envs, self.n_cables, 8, device=self.device)
-        dir_init = cfg.get("cable_initial_dirs", [[0, 0, 1]] * self.n_cables)  # (n,3)
         for i in range(self.n_cables):
-            self.state[:, i, 6] = cfg.get("cable_initial_tensions", 2)  # 初始张力 (N)
+            self.state[:, i, 6] = cfg.get("cable_initial_tensions")  # 初始张力 (N)
             self.state[:, i, 0:3] = torch.tensor(dir_init[i], device=self.device)
 
         # 便捷成员变量
