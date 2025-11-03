@@ -43,12 +43,14 @@ class RLGamesEnv:
         self.last_quat_error = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.last_omega_error = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.angles = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.pos_error_all = torch.zeros(self.num_envs, 101, dtype=torch.float32, device=self.device)
         # 动力学仿真器
         self.payload = PayloadDynamicsSimBatch()
         self.cable = CableDynamicsSimBatch()
         self.v_dot = self.payload.v_dot 
         self.omega_dot = self.payload.omega_dot
         self.r_g = self.payload.r_g
+        self.r_i = self.cable.r_i
         # 奖励log
         self.reward_log = torch.zeros(6, dtype=torch.float32, device=self.device)
         self.end_pos_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
@@ -256,7 +258,7 @@ class RLGamesEnv:
         # 计算每个环境当前位置与轨迹上所有点的距离 (B, T)
         T = self.ref_xl.shape[0]
         # self.ref_xl[:,0:3] -> (T,3), p_l.unsqueeze(1) -> (B,1,3) -> broadcast -> (B,T,3)
-        pos_error_all = torch.norm(p_l.unsqueeze(1) - self.ref_xl[:, 0:3].unsqueeze(0), dim=2)  # (B, T)
+        self.pos_error_all = torch.norm(p_l.unsqueeze(1) - self.ref_xl[:, 0:3].unsqueeze(0), dim=2)  # (B, T)
         # 误差计算
         pos_error = torch.norm(p_l - p_l_ref, dim=1)
         vel_error = torch.norm(v_l - v_l_ref, dim=1)
@@ -274,28 +276,28 @@ class RLGamesEnv:
         # print(f"Omega errors: {omega_error}")
 
         dt = self.config.get("dt")  # 仿真步长
-        pos_error = pos_error_all.min(dim=1).values
+        # pos_error = pos_error_all.min(dim=1).values
         # 位置奖励：指数衰减
         pos_scale = self.config.get("pos_reward_scale")  # 距离缩放系数
         reward_pos = self.pos_w * torch.exp(-3*pos_error) * pos_scale
         
         # 速度奖励：指数衰减
         vel_scale = self.config.get("vel_reward_scale")
-        reward_vel = self.vel_w * torch.exp(-1*vel_error) * vel_scale
+        reward_vel = self.vel_w * torch.exp(-3*vel_error) * vel_scale
 
         # 姿态奖励：指数衰减
         quat_scale = self.config.get("quat_reward_scale")  # 四元数误差通常较小
-        reward_quat = self.quat_w * torch.exp(-1*quat_error) * quat_scale
+        reward_quat = self.quat_w * torch.exp(-3*quat_error) * quat_scale
 
         # 角速度奖励：指数衰减
         omega_scale = self.config.get("omega_reward_scale")
-        reward_omega = self.omega_w * torch.exp(-1 * omega_error) * omega_scale
+        reward_omega = self.omega_w * torch.exp(-3 * omega_error) * omega_scale
 
         self.reward_log[0] = reward_pos[0]
         self.reward_log[1] = reward_vel[0]
         self.reward_log[2] = reward_quat[0]
         self.reward_log[3] = reward_omega[0]
-        reward = reward_pos 
+        reward = reward_pos + reward_vel + reward_quat + reward_omega
         # self.last_pos_error = pos_error.clone()
         # self.last_vel_error = vel_error.clone()
         # self.last_quat_error = quat_error.clone()
@@ -327,7 +329,7 @@ class RLGamesEnv:
         end_pos = torch.tensor(self.ref_traj['Ref_xl'][-1][0:3], device=self.device)
         dis_to_end = torch.norm(p_l - end_pos, dim=1)
         self.end_pos_reward =  -dis_to_end * dt
-        reward += self.end_pos_reward
+        # reward += self.end_pos_reward
         
         # dis_to_end = torch.norm(p_l - torch.tensor(self.ref_traj['Ref_xl'][-1][0:3], device=self.device), dim=1)
         # self.end_pos_reward = (0.99*self.last_dis - dis_to_end) * 10 
@@ -378,15 +380,15 @@ class RLGamesEnv:
         # 2. 负载高度终止条件（负载高度小于等于0）
         payload_height = current_pos[:, 2]  # Z坐标 (B,)
 
-        done |= (payload_height <= 0.4)
-        self.env_done[done] += 1
+        # done |= (payload_height <= 0.4)
+        # self.env_done[done] += 1
         # if (payload_height <= 0.0).any():
         #     # print("payload heights:", payload_height)
         # if done.all():
             # print("Payload heights:")
             # print("payload_state:", self.payload.state)
         # 3. 障碍物碰撞检测（假设 self.obstacle_pos 是 (N, 2)，平面上 N 个障碍物）
-        if len(self.obstacle_pos) == 0:
+        if len(self.obstacle_pos) > 0:
             obs_pos = self.obstacle_pos.to(self.device)        # (N, 2)
             obs_pos = obs_pos.unsqueeze(0).expand(B, -1, -1)   # (B, N, 2)
 
@@ -399,32 +401,35 @@ class RLGamesEnv:
             #     print("Min distances from payload to obstacles:", min_dist)
             self.env_done[done] += 1
             # 无人机与障碍物碰撞检测
-            # drone_xy = self.drone_pos[:, :, :2].unsqueeze(2)   # (B, N_cables, 1, 2)
-            # obs_pos = obs_pos.unsqueeze(1)                     # (B, 1, N, 2)
-            # dist_to_obs = torch.norm(drone_xy - obs_pos, dim=3)  # (B, N_cables, N)
-            # min_dist, _ = torch.min(dist_to_obs, dim=2)          # (B, N_cables)
-            # done |= (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any(dim=1)
-            # # if (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any():
-            # #     print("Min distances from drones to obstacles:", min_dist)
-            # self.env_done[done] += 1
+            drone_xy = self.drone_pos[:, :, :2].unsqueeze(2)   # (B, N_cables, 1, 2)
+            obs_pos = obs_pos.unsqueeze(1)                     # (B, 1, N, 2)
+            dist_to_obs = torch.norm(drone_xy - obs_pos, dim=3)  # (B, N_cables, N)
+            min_dist, _ = torch.min(dist_to_obs, dim=2)          # (B, N_cables)
+            done |= (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any(dim=1)
+            # if (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any():
+            #     print("Min distances from drones to obstacles:", min_dist)
+            self.env_done[done] += 1
             # if done.all():
                 # print("Min distances from drones to obstacles:")
                 
-            # # 无人机之间的碰撞检测
-            # drone_xy = self.drone_pos[:, :, :2]  # (B, N_cables, 2)
-            # drone_z = self.drone_pos[:, :, 2]    # (B, N_cables)
-            # for i in range(self.n_cables):
-            #     for j in range(i+1, self.n_cables):
-            #         # xy平面距离
-            #         dist_xy = torch.norm(drone_xy[:, i, :] - drone_xy[:, j, :], dim=1)  # (B,)
-            #         # z轴距离
-            #         dist_z = torch.abs(drone_z[:, i] - drone_z[:, j])  # (B,)
-            #         # xy距离和z距离都小于阈值才算碰撞
-            #         collision = (dist_xy < (2*self.drone_radius + self.collision_tolerance)) & \
-            #                     (dist_z < self.drone_high_distance)
-            #         done |= collision
-            #         if done.all():
-            #             print("Drone collisions:")
+            # ------------------ 无人机-无人机碰撞检测 ------------------
+        drone_pos_xyz = self.drone_pos  # (B, N, 3)
+        B, N, _ = drone_pos_xyz.shape
+        # 扩展维度以计算所有无人机之间的两两距离
+        pos_i = drone_pos_xyz.unsqueeze(2)  # (B, N, 1, 3)
+        pos_j = drone_pos_xyz.unsqueeze(1)  # (B, 1, N, 3)
+        # 计算无人机间的欧几里得距离
+        dist = torch.norm(pos_i - pos_j, dim=-1)  # (B, N, N)
+        # 生成 mask，忽略自身距离（对角线）
+        mask = ~torch.eye(N, dtype=torch.bool, device=dist.device).unsqueeze(0)  # (1, N, N)
+        dist_masked = dist.masked_fill(~mask, float('inf'))  # 自身距离设为无穷大
+        # 判断是否碰撞：任意两架无人机的距离小于安全阈值则判定碰撞
+        collision_threshold = 3 * self.drone_radius + self.collision_tolerance
+        collision = dist_masked < collision_threshold  # (B, N, N)
+        # 若任意两架无人机碰撞，则该环境 done = True
+        done |= collision.any(dim=(1, 2))
+        self.env_done[done] += 1
+
                     
         # 4. 绳子拉力终止条件
         done |= ((self.cable.T > self.t_max) | (self.cable.T < 0.0)).any(dim=1)
@@ -437,7 +442,7 @@ class RLGamesEnv:
         init_dir = init_dir.unsqueeze(0).expand(B, -1, -1).to(self.device)  # (B, N, 3)
         cos_angle = torch.clamp((curr_dir * init_dir).sum(dim=2), -1.0, 1.0)  # (B, N)
         angles = torch.acos(cos_angle)  # (B, N), 单位：弧度
-        max_allowed = torch.pi / 3  # 60 度
+        max_allowed = torch.pi / 2  # 90 度
         # done |= (angles > max_allowed).any(dim=1)
         self.angles = angles.max(dim=1).values
         self.env_done[done] += 1
@@ -447,8 +452,11 @@ class RLGamesEnv:
         done |= (self.current_point_indices >= len(self.ref_traj['Ref_xl']) - 1)
         self.env_done[done] += 1
         # 离终点距离最大偏移终止条件
-        dis_to_end = torch.norm(current_pos - torch.tensor(self.ref_traj['Ref_xl'][-1][0:3], device=self.device), dim=1)
-        done |= (dis_to_end > 5)
+        # dis_to_end = torch.norm(current_pos - torch.tensor(self.ref_traj['Ref_xl'][-1][0:3], device=self.device), dim=1)
+        # done |= (dis_to_end > 5)
+        # 偏离轨迹过远终止条件
+        pos_error_all_min = self.pos_error_all.min(dim=1).values
+        done |= (pos_error_all_min > 0.2)
         self.env_done[done] += 1
             
         info = []
@@ -534,155 +542,256 @@ class RLGamesEnv:
         self.payload_traj_list[0].append(self.payload.state[0, 0:3].cpu().numpy())
 
     def draw_payload_traj_list(self):
-        """绘制第一个环境的负载3D轨迹并保存到results/payload目录"""
+        """绘制第一个环境的负载3D轨迹并保存到results/payload目录
+           更新：
+           - 负载用一个圆表示（圆在负载自身局部 XY 平面上，随四元数旋转）
+           - 绳子挂载点使用 self.r_i（负载局部坐标），在图中绘制为点
+           - 无人机用圆表示，半径由 self.drone_radius 指定（默认 0.125）
+           - 在绘制完 3D 图后，额外绘制一张俯视图（XY 平面投影），负载/无人机/障碍物用不同颜色圆圈
+           - 两张图片都保存到 results/payload 目录，文件名带时间戳
+        """
         if not self.payload_traj_list or len(self.payload_traj_list[0]) == 0:
             print("No trajectory data to plot for environment 0")
             return
-        
+
         # 创建保存目录
         save_dir = "results/payload"
         os.makedirs(save_dir, exist_ok=True)
-        
-        # 创建3D图形
+
+        # ----- 3D 图 -----
         fig = plt.figure(figsize=(12, 8))
         ax = fig.add_subplot(111, projection='3d')
-        
+
         # 只绘制第一个环境的轨迹
         env_idx = 0
         if len(self.payload_traj_list[env_idx]) > 1:  # 至少需要2个点才能画轨迹
             traj = np.array(self.payload_traj_list[env_idx])  # (n_points, 3)
-            ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 
-                color='blue', 
-                label=f'Actual Trajectory', 
-                linewidth=2, 
-                alpha=0.8)
-            
+            ax.plot(traj[:, 0], traj[:, 1], traj[:, 2],
+                    color='blue',
+                    label=f'Actual Trajectory',
+                    linewidth=2,
+                    alpha=0.8)
+
             # 标记起点和终点
-            ax.scatter(traj[0, 0], traj[0, 1], traj[0, 2], 
-                    color='green', marker='o', s=100, alpha=0.9, label='Start')
-            ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], 
-                    color='red', marker='s', s=100, alpha=0.9, label='End')
-            # ===== 新增：在终点显示坐标 =====
+            ax.scatter(traj[0, 0], traj[0, 1], traj[0, 2],
+                       color='green', marker='o', s=100, alpha=0.9, label='Start')
+            ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2],
+                       color='red', marker='s', s=100, alpha=0.9, label='End')
+            # 在终点显示坐标
             end_x, end_y, end_z = traj[-1]
-            ax.text(end_x, end_y, end_z + 0.1,  # 稍微抬高一点避免重叠
-                    f"({end_x:.2f}, {end_y:.2f}, {end_z:.2f})", 
+            ax.text(end_x, end_y, end_z + 0.1,
+                    f"({end_x:.2f}, {end_y:.2f}, {end_z:.2f})",
                     color='red', fontsize=10, weight='bold')
-            print(f"绘制轨迹：{len(traj)} 个点")
-            # === 新增：绘制终点到地面的垂线 ===
+            # 终点到地面的垂线
             ax.plot([end_x, end_x], [end_y, end_y], [0, end_z],
                     color='gray', linestyle='--', linewidth=1.5, alpha=0.7)
 
-            # 在地面位置标一个点（投影点）
-            ax.scatter(end_x, end_y, 0, color='black', marker='x', s=60, label='End Projection')
-                
-        # 绘制参考轨迹
+        # 绘制负载圆与挂载点
+        attach_world = None
+        p_load = None
+        try:
+            p_load = self.payload.state[0, 0:3].cpu().numpy()
+            q_load = self.payload.state[0, 6:10].unsqueeze(0)
+            R_l = quat_to_rot(q_load).squeeze(0).cpu().numpy()
+            circle_radius = float(self.r_payload) if hasattr(self, 'r_payload') and self.r_payload is not None else 0.2
+            theta = np.linspace(0, 2*np.pi, 60)
+            circle_local = np.stack([circle_radius*np.cos(theta),
+                                     circle_radius*np.sin(theta),
+                                     np.zeros_like(theta)], axis=1)
+            circle_world = (R_l @ circle_local.T).T + p_load
+            ax.plot(circle_world[:,0], circle_world[:,1], circle_world[:,2],
+                    color='magenta', linewidth=2, alpha=0.9, label='Payload (circle)')
+            try:
+                from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+                verts = [list(circle_world)]
+                poly = Poly3DCollection(verts, alpha=0.15, facecolor='magenta', edgecolor=None)
+                ax.add_collection3d(poly)
+            except Exception:
+                pass
+
+            # 挂载点（局部 r_i -> 世界坐标）
+            r_i_local = self.r_i.cpu().numpy()
+            attach_world = (R_l @ r_i_local.T).T + p_load
+            ax.scatter(attach_world[:,0], attach_world[:,1], attach_world[:,2],
+                       color='red', marker='o', s=80, label='Attachment points', edgecolors='black')
+            for aw in attach_world:
+                ax.plot([p_load[0], aw[0]], [p_load[1], aw[1]], [p_load[2], aw[2]],
+                        color='red', linestyle='--', linewidth=1.0, alpha=0.6)
+        except Exception as e:
+            print(f"Error drawing payload circle or attachment points: {e}")
+            p_load = None
+
+        # 参考轨迹（3D）
         if hasattr(self, 'ref_traj_vis') and self.ref_traj_vis is not None:
             ref_traj = np.array(self.ref_traj_vis)
-            ax.plot(ref_traj[:, 0], ref_traj[:, 1], ref_traj[:, 2], 
-                'k--', linewidth=2, alpha=0.6, label='Reference Trajectory')
-            # === ✅ 新增：绘制参考轨迹在地面的投影（虚线） ===
+            ax.plot(ref_traj[:, 0], ref_traj[:, 1], ref_traj[:, 2],
+                    'k--', linewidth=2, alpha=0.6, label='Reference Trajectory')
             ax.plot(ref_traj[:, 0], ref_traj[:, 1], np.zeros_like(ref_traj[:, 2]),
                     color='gray', linestyle='--', linewidth=1.5, alpha=0.5,
                     label='Ref Trajectory Projection')
-         # === 新增：绘制起点和终点垂线 ===
-        ref_start_x, ref_start_y, ref_start_z = ref_traj[0]
-        ref_end_x, ref_end_y, ref_end_z = ref_traj[-1]
-        
-        # 起点垂线
-        ax.plot([ref_start_x, ref_start_x], [ref_start_y, ref_start_y], [0, ref_start_z],
-                color='gray', linestyle='--', linewidth=1.2, alpha=0.7)
-        ax.scatter(ref_start_x, ref_start_y, 0, color='green', marker='^', s=60, label='Ref Start Projection')
-        
-        # 终点垂线
-        ax.plot([ref_end_x, ref_end_x], [ref_end_y, ref_end_y], [0, ref_end_z],
-                color='gray', linestyle='--', linewidth=1.2, alpha=0.7)
-        ax.scatter(ref_end_x, ref_end_y, 0, color='red', marker='v', s=60, label='Ref End Projection')
-        
-        # === 新增：绘制当前无人机位置 ===
-        if hasattr(self, 'drone_pos') and self.drone_pos is not None:
-            drone_positions = self.drone_pos[0].cpu().numpy()  # (N_cables, 3)
-            # 所有无人机使用相同的颜色和点标记
-            drone_color = 'orange'
-            
-            for i, pos in enumerate(drone_positions):
-                # 只在第一个无人机添加图例标签
-                label = 'Drones' if i == 0 else None
-                ax.scatter(pos[0], pos[1], pos[2], 
-                         color=drone_color, marker='o', s=120, alpha=0.9,
-                         label=label, edgecolors='black', linewidth=1)
-                
-                # 绘制无人机到负载的连线（绳子）
-                if len(self.payload_traj_list[0]) > 0:
-                    payload_pos = self.payload_traj_list[0][-1]  # 使用最后记录的负载位置
-                    ax.plot([pos[0], payload_pos[0]], 
-                           [pos[1], payload_pos[1]], 
-                           [pos[2], payload_pos[2]], 
-                           color=drone_color, linestyle='-', linewidth=1.5, alpha=0.6)
 
-        # 绘制障碍物 - 使用竖直线表示
+        # 绘制无人机（3D 圆盘）
+        drone_circle_radius = float(self.drone_radius) if hasattr(self, 'drone_radius') else 0.125
+        if hasattr(self, 'drone_pos') and self.drone_pos is not None:
+            try:
+                drone_positions = self.drone_pos[0].cpu().numpy()
+                drone_color = 'orange'
+                theta = np.linspace(0, 2*np.pi, 40)
+                for i, pos in enumerate(drone_positions):
+                    circle_xy = np.stack([drone_circle_radius * np.cos(theta) + pos[0],
+                                          drone_circle_radius * np.sin(theta) + pos[1],
+                                          np.full_like(theta, pos[2])], axis=1)
+                    ax.plot(circle_xy[:,0], circle_xy[:,1], circle_xy[:,2],
+                            color=drone_color, linewidth=2, alpha=0.9,
+                            label='Drones' if i == 0 else None)
+                    try:
+                        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+                        verts = [list(circle_xy)]
+                        poly = Poly3DCollection(verts, alpha=0.2, facecolor=drone_color, edgecolor=None)
+                        ax.add_collection3d(poly)
+                    except Exception:
+                        pass
+
+                    if attach_world is not None and i < attach_world.shape[0]:
+                        aw = attach_world[i]
+                        ax.plot([pos[0], aw[0]],
+                                [pos[1], aw[1]],
+                                [pos[2], aw[2]],
+                                color=drone_color, linestyle='-', linewidth=1.5, alpha=0.6)
+                    else:
+                        if p_load is not None:
+                            ax.plot([pos[0], p_load[0]],
+                                    [pos[1], p_load[1]],
+                                    [pos[2], p_load[2]],
+                                    color=drone_color, linestyle='-', linewidth=1.5, alpha=0.6)
+            except Exception as e:
+                print(f"Error drawing drones: {e}")
+
+        # 障碍物（3D）
         if len(self.obstacle_pos) > 0:
             for i, obs_pos in enumerate(self.obstacle_pos.cpu().numpy()):
-                # 绘制障碍物中心的竖直线
-                ax.plot([obs_pos[0], obs_pos[0]], 
-                    [obs_pos[1], obs_pos[1]], 
-                    [0, 3], 
-                    'r-', linewidth=4, alpha=0.8, 
-                    label=f'Obstacle {i+1}' if i == 0 else "")
-                
-                # 在底部绘制圆圈表示障碍物边界
+                ax.plot([obs_pos[0], obs_pos[0]],
+                        [obs_pos[1], obs_pos[1]],
+                        [0, 3],
+                        'r-', linewidth=4, alpha=0.8,
+                        label=f'Obstacle {i+1}' if i == 0 else "")
                 theta = np.linspace(0, 2*np.pi, 50)
                 x_circle = obs_pos[0] + self.obstacle_r * np.cos(theta)
                 y_circle = obs_pos[1] + self.obstacle_r * np.sin(theta)
-                z_circle = np.zeros_like(x_circle)  # 在地面画圆
+                z_circle = np.zeros_like(x_circle)
                 ax.plot(x_circle, y_circle, z_circle, 'r-', alpha=0.5, linewidth=1)
-                
-                # 在顶部也画一个圆
                 z_circle_top = np.full_like(x_circle, 3)
                 ax.plot(x_circle, y_circle, z_circle_top, 'r-', alpha=0.5, linewidth=1)
 
-        # 设置图形属性
+        # 3D 图属性 & 保存
         ax.set_xlabel('X (m)')
         ax.set_ylabel('Y (m)')
         ax.set_zlabel('Z (m)')
-        # 获取轨迹进展值
         traj_progress_value = self.traj_progress[0].item()
         env1_Reward = self.reward[0].item()
-        # 在标题中添加轨迹进展信息
         ax.set_title(f'Payload Trajectory - Environment 0\n'
-                    f'Steps: {self.step_counters[0].item()} | '
-                    f'Progress: {traj_progress_value}/{len(self.ref_traj["Ref_xl"])-1}'
-                    f' | Reward: {env1_Reward:.2f}' f' | Env1 Done: {self.env_done[0]}', fontsize=14)
+                     f'Steps: {self.step_counters[0].item()} | '
+                     f'Progress: {traj_progress_value}/{len(self.ref_traj["Ref_xl"])-1}'
+                     f' | Reward: {env1_Reward:.2f}' f' | Env1 Done: {self.env_done[0]}', fontsize=14)
         ax.legend()
         ax.grid(True)
-        
-        # 设置相等的坐标轴比例
-        max_range = 2.0  # 设置默认范围
-        if len(self.payload_traj_list[0]) > 0:
-            traj = np.array(self.payload_traj_list[0])
-            traj_range = np.max(np.abs(traj))
-            max_range = max(max_range, traj_range)
-        
-        # 同时考虑参考轨迹的范围
-        if hasattr(self, 'ref_traj_vis') and self.ref_traj_vis is not None:
-            ref_range = np.max(np.abs(self.ref_traj_vis))
-            max_range = max(max_range, ref_range)
-        
+
         ax.set_xlim([-1,3])
         ax.set_ylim([-1,3])
         ax.set_zlim([0, 1])
-        
-        # 保存图片
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"payload_trajectory_env0_{timestamp}_steps{self.step_counters[0].item()}.png"
-        filepath = os.path.join(save_dir, filename)
-        
+        filename_3d = f"payload_trajectory_env0_{timestamp}_steps{self.step_counters[0].item()}.png"
+        filepath_3d = os.path.join(save_dir, filename_3d)
+
         plt.tight_layout()
-        plt.savefig(filepath, dpi=300, bbox_inches='tight')
-        plt.close()  # 关闭图形以释放内存
-        
-        print(f"Environment 0 payload trajectory saved to: {filepath}")
-        
-        # 只清空第一个环境的轨迹记录器
+        plt.savefig(filepath_3d, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"Environment 0 payload trajectory saved to: {filepath_3d}")
+
+        # ----- 俯视图（Top-down XY） -----
+        try:
+            fig2, ax2 = plt.subplots(figsize=(8, 8))
+
+            # 轨迹投影
+            if len(self.payload_traj_list[env_idx]) > 0:
+                traj_xy = np.array(self.payload_traj_list[env_idx])[:, :2]
+                ax2.plot(traj_xy[:, 0], traj_xy[:, 1], color='blue', linewidth=2, label='Actual Trajectory (proj)')
+                ax2.scatter(traj_xy[0, 0], traj_xy[0, 1], color='green', s=60, label='Start (proj)')
+                ax2.scatter(traj_xy[-1, 0], traj_xy[-1, 1], color='red', s=60, label='End (proj)')
+
+            # 参考轨迹投影
+            if hasattr(self, 'ref_traj_vis') and self.ref_traj_vis is not None:
+                ref_traj = np.array(self.ref_traj_vis)
+                ax2.plot(ref_traj[:, 0], ref_traj[:, 1], 'k--', linewidth=1.5, alpha=0.7, label='Ref Trajectory (proj)')
+
+            # 负载（用圆表示）
+            if p_load is not None:
+                load_circle = plt.Circle((p_load[0], p_load[1]), circle_radius, color='magenta', alpha=0.25, label='Payload (proj)')
+                ax2.add_patch(load_circle)
+                ax2.scatter(p_load[0], p_load[1], color='magenta', s=40)
+
+            # 无人机（圆）
+            if hasattr(self, 'drone_pos') and self.drone_pos is not None:
+                drone_positions = self.drone_pos[0].cpu().numpy()
+                for i, pos in enumerate(drone_positions):
+                    c = plt.Circle((pos[0], pos[1]), drone_circle_radius, color='orange', alpha=0.4, label='Drones (proj)' if i == 0 else None)
+                    ax2.add_patch(c)
+                    ax2.scatter(pos[0], pos[1], color='orange', edgecolors='black', s=30)
+
+            # 障碍物（圆）
+            if len(self.obstacle_pos) > 0:
+                for i, obs_pos in enumerate(self.obstacle_pos.cpu().numpy()):
+                    c_obs = plt.Circle((obs_pos[0], obs_pos[1]), self.obstacle_r, color='red', alpha=0.25, label='Obstacles' if i == 0 else None)
+                    ax2.add_patch(c_obs)
+                    ax2.scatter(obs_pos[0], obs_pos[1], color='red', s=30)
+
+            # 绘制挂载点投影
+            if attach_world is not None:
+                aw_xy = attach_world[:, :2]
+                ax2.scatter(aw_xy[:, 0], aw_xy[:, 1], color='red', s=30, marker='x', label='Attachment (proj)')
+
+            # 格式化轴
+            ax2.set_xlabel('X (m)')
+            ax2.set_ylabel('Y (m)')
+            ax2.set_aspect('equal', adjustable='box')
+            ax2.grid(True)
+            ax2.set_title(f'Top-down View - Env0 (XY Projection)\nStep {self.step_counters[0].item()}')
+
+            # 设定显示范围，尽量包络轨迹和对象
+            try:
+                all_x = []
+                all_y = []
+                if len(self.payload_traj_list[env_idx]) > 0:
+                    all_x.extend(traj_xy[:, 0].tolist()); all_y.extend(traj_xy[:, 1].tolist())
+                if hasattr(self, 'ref_traj_vis') and self.ref_traj_vis is not None:
+                    all_x.extend(ref_traj[:, 0].tolist()); all_y.extend(ref_traj[:, 1].tolist())
+                if p_load is not None:
+                    all_x.append(p_load[0]); all_y.append(p_load[1])
+                if hasattr(self, 'drone_pos') and self.drone_pos is not None:
+                    all_x.extend(drone_positions[:, 0].tolist()); all_y.extend(drone_positions[:, 1].tolist())
+                if len(self.obstacle_pos) > 0:
+                    obs_np = self.obstacle_pos.cpu().numpy()
+                    all_x.extend(obs_np[:, 0].tolist()); all_y.extend(obs_np[:, 1].tolist())
+
+                if len(all_x) > 0:
+                    margin = 0.5
+                    ax2.set_xlim(min(all_x) - margin, max(all_x) + margin)
+                    ax2.set_ylim(min(all_y) - margin, max(all_y) + margin)
+            except Exception:
+                pass
+
+            ax2.legend(loc='upper right')
+            filename_2d = f"payload_trajectory_env0_topdown_{timestamp}_steps{self.step_counters[0].item()}.png"
+            filepath_2d = os.path.join(save_dir, filename_2d)
+            plt.tight_layout()
+            plt.savefig(filepath_2d, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"Environment 0 top-down view saved to: {filepath_2d}")
+        except Exception as e:
+            print(f"Failed to create top-down view: {e}")
+
+        # 清空轨迹记录
         self.payload_traj_list[0].clear()
-        
         print("Environment 0 trajectory record cleared")

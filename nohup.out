@@ -27020,3 +27020,4 @@ RunningMeanStd:  (1,)
 RunningMeanStd:  (36,)
 fps step: 585037 fps step and policy inference: 407755 fps total: 52720 epoch: 1/10000
 fps step: 568332 fps step and policy inference: 424225 fps total: 53394 epoch: 2/10000
+nohup: failed to run command '、python': No such file or directory
