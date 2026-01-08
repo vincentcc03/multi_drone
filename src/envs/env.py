@@ -13,6 +13,7 @@ from src.utils.read_yaml import load_config
 from src.utils.computer import quat_to_rot
 from src.utils.plot_ppo import DroneVisualization
 from src.utils.log import TrainingLogger
+import random
 
 # 控制print输出的开关
 ENABLE_PRINT = False  # 设置为False即可关闭所有print
@@ -44,6 +45,9 @@ class RLGamesEnv:
         self.last_omega_error = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.angles = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.pos_error_all = torch.zeros(self.num_envs, 101, dtype=torch.float32, device=self.device)
+        self.min_drone_load_dist = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.min_drone_drone_dist = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.traj_point_achieved = torch.zeros(self.num_envs, 101, dtype=torch.bool, device=self.device)
         # 动力学仿真器
         self.payload = PayloadDynamicsSimBatch()
         self.cable = CableDynamicsSimBatch()
@@ -52,7 +56,7 @@ class RLGamesEnv:
         self.r_g = self.payload.r_g
         self.r_i = self.cable.r_i
         # 奖励log
-        self.reward_log = torch.zeros(6, dtype=torch.float32, device=self.device)
+        self.reward_log = torch.zeros(8, dtype=torch.float32, device=self.device)
         self.end_pos_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.action_smoothness = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         # 参考轨迹
@@ -61,6 +65,15 @@ class RLGamesEnv:
         self.ref_xl_end = self.ref_xl[-1].unsqueeze(0).expand(self.num_envs, -1)
         self.payload_init_state = self.ref_xl[0].clone()
         print("Payload initial state:", self.payload_init_state)
+        self.pos_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.vel_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.quat_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.omega_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.traj_progress_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.drone_drone_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.drone_payload_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.action_smoothness_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.first_reach_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         # 轨迹进展 bool tensor
         self.traj_progress = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
@@ -102,13 +115,13 @@ class RLGamesEnv:
         # episode 计数
         self.current_point_indices = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.step_counters = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.interval = self.traj_config["dt"]/self.config["dt"]
+        self.interval = int(round(self.traj_config["dt"] / self.config["dt"]))
         
 
         # obs / act 空间
         self.obs_dim = 3+6+13+1+13  # rg(3) + 障碍物(6) + 参考负载状态(13) + 无人机半径(1)
         self.act_dim = 4 * self.n_cables
-        self.action = torch.zeros(self.num_envs, 6, 4, dtype=torch.float32, device=self.device)
+        self.action = torch.zeros(self.num_envs, self.n_cables, 4, dtype=torch.float32, device=self.device)
         self.action_smoothness = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         
         # 无人机位置
@@ -123,36 +136,69 @@ class RLGamesEnv:
         reset_mask = self.done  # (B,) boolean tensor
         
         if reset_mask.any():
-            self.logger.log_step(self.traj_progress.max().item(), self.reward.mean().item(), self.reward_log[0].item(), self.reward_log[1].item(), self.reward_log[2].item(), self.reward_log[3].item(), self.reward_log[4].item(), self.reward_log[5].item())
-           
+            self.logger.log_step(
+                self.traj_progress.max().item(), 
+                self.reward.mean().item(), 
+                self.reward_log[0].item(), 
+                self.reward_log[1].item(), 
+                self.reward_log[2].item(), 
+                self.reward_log[3].item(), 
+                self.reward_log[4].item(), 
+                self.reward_log[5].item(),
+                self.reward_log[6].item(),
+                self.reward_log[7].item()
+            )
+        
             # 向量化重置（性能更好）
             if reset_mask[0]:  # 如果第一个环境需要重置，清空其轨迹记录器
                 self.draw_payload_traj_list()
                 
             num_reset = reset_mask.sum().item()
-             
-            # 扩展初始状态到需要重置的环境数量
-            payload_init_expanded = self.payload_init_state.unsqueeze(0).expand(num_reset, -1).to(self.device)
+            
+            # ========== 核心修改：根据current_point_indices获取对应参考位置 ==========
+            # 1. 生成随机的索引（1-10 或 90-100）
+            choices = torch.randint(0, 3, size=(num_reset,), device=self.device)
+            nums_1 = torch.randint(0, 41, size=(num_reset,), device=self.device)  # 1-10
+            nums_80 = torch.randint(60, 101, size=(num_reset,), device=self.device)  # 90-100
+            random_nums = torch.where(choices == 0, nums_80, nums_1)
+            self.current_point_indices[reset_mask] = random_nums
+            print("Random indices for reset environments:", random_nums)
+            
+            # 2. 从参考轨迹中取出对应索引的位置（转为张量并适配设备）
+            # 确保ref_traj_vis是张量，且索引不越界
+            ref_traj_tensor = torch.tensor(self.ref_traj_vis, device=self.device, dtype=torch.float32)
+            # 取出需要重置的环境对应的参考位置（random_nums是索引）
+            payload_init_custom = ref_traj_tensor[random_nums]  # (num_reset, 3)
+            
+            # 3. 扩展初始状态：保留payload除位置外的其他维度（如速度、姿态等），仅替换位置
+            # 先复制原始初始状态的结构
+            payload_init_expanded = self.payload_init_state.unsqueeze(0).repeat(num_reset, 1).to(self.device)
+            # 替换位置部分（前3维）为参考轨迹的对应位置
+            payload_init_expanded[:, 0:3] = payload_init_custom
+            print("Payload initial states for reset environments:", payload_init_expanded)
+            # 电缆初始状态保持不变
             cable_init_expanded = self.cable_init_state.unsqueeze(0).expand(num_reset, -1, -1).to(self.device)
             
             # 批量重置
-            self.payload.state[reset_mask] = payload_init_expanded
+            self.payload.state[reset_mask] = payload_init_expanded  # 用自定义初始位置赋值
             self.cable.state[reset_mask] = cable_init_expanded
             self.reward[reset_mask] = 0.0
             self.pos_error_count[reset_mask] = 0
             self.traj_progress[reset_mask] = 0
             self.env_done[reset_mask] = 0
-            self.last_dis[reset_mask] = torch.norm(self.payload.state[reset_mask, 0:3] - torch.tensor(self.ref_traj['Ref_xl'][-1][0:3], device=self.device), dim=1)
+            
+            # 修正：last_dis计算改为当前初始位置到最后参考点的距离
+            # self.last_dis[reset_mask] = torch.norm(self.payload.state[reset_mask, 0:3] - torch.tensor(self.ref_traj['Ref_xl'][-1][0:3], device=self.device), dim=1)
+            
             self.last_pos_error[reset_mask] = 0.0
             self.last_vel_error[reset_mask] = 0.0
             self.last_quat_error[reset_mask] = 0.0
             self.last_omega_error[reset_mask] = 0.0
             self.angles[reset_mask] = 0.0
-            # 重置计数器
-            # print("done:",reset_mask)
+            self.traj_point_achieved[reset_mask] = False
             
-            self.current_point_indices[reset_mask] = 0
-            self.step_counters[reset_mask] = 0
+            # 重置计数器（确保interval是整数，避免类型不匹配）
+            self.step_counters[reset_mask] = self.current_point_indices[reset_mask] * self.interval
             
             self.done[reset_mask] = False
         
@@ -171,7 +217,7 @@ class RLGamesEnv:
         
         action = torch.as_tensor(action, dtype=torch.float32, device=self.device)
         action = action.view(B, N, 4)
-        action *= 2
+        action *= 1
         self.action_smoothness = -torch.norm(action - self.action, dim=(1,2))
         self.action = action
         print("Action:", self.action[0])
@@ -259,6 +305,9 @@ class RLGamesEnv:
         T = self.ref_xl.shape[0]
         # self.ref_xl[:,0:3] -> (T,3), p_l.unsqueeze(1) -> (B,1,3) -> broadcast -> (B,T,3)
         self.pos_error_all = torch.norm(p_l.unsqueeze(1) - self.ref_xl[:, 0:3].unsqueeze(0), dim=2)  # (B, T)
+        # 如果到达了某个轨迹点，则标记为已达成
+        reached_mask = self.pos_error_all < 0.1  # (B, T) bool tensor
+        self.traj_point_achieved[reached_mask] = True
         # 误差计算
         pos_error = torch.norm(p_l - p_l_ref, dim=1)
         vel_error = torch.norm(v_l - v_l_ref, dim=1)
@@ -302,27 +351,36 @@ class RLGamesEnv:
         # self.last_vel_error = vel_error.clone()
         # self.last_quat_error = quat_error.clone()
         # self.last_omega_error = omega_error.clone()
+        # 无人机负载间距惩罚
+        drone_load_dist_reward = -torch.exp(-self.min_drone_load_dist*20)*10
+        reward += drone_load_dist_reward
+        # 无人机间距惩罚
+        drone_drone_dist_reward = -torch.exp(-self.min_drone_drone_dist*20)*10
+        reward += drone_drone_dist_reward
+        
         # 角度惩罚
         angle_reward = -self.angles*0.4
         # reward += angle_reward
         # 高度惩罚
         height_reward = -abs(0.5 - p_l[:, 2])
         # reward += height_reward * 0.1
-        self.reward_log[4] = angle_reward[0]
-        self.reward_log[5] = height_reward[0]
+        self.reward_log[4] = drone_load_dist_reward[0]
+        self.reward_log[5] = drone_drone_dist_reward[0]
         # 进度奖励
         pos_errornow = torch.norm(p_l - p_l_ref2, dim=1)
         reach = pos_errornow < 0.05
         last_progress = self.traj_progress.clone()
         self.traj_progress[reach] = self.current_point_indices[reach]
-        first_reach = (self.traj_progress != last_progress) & (self.current_point_indices > 14)
+        first_reach = (self.traj_progress != last_progress) & (self.current_point_indices > 11)
         # 第一次到达了这个
         reward += first_reach.float() * 50
 
-        # 终止惩罚
+        # 终止惩罚，到达轨迹点个数越多越好
         penalty_mask = (self.done & (self.env_done == 1) | (self.env_done == 6)|(self.env_done == 7))  # 因碰撞或拉力过大终止
         penalty_mask = self.done 
-        reward += penalty_mask.float() * (self.traj_progress/100 - 1) * 200
+        traj_progress_reward = penalty_mask.float() * (self.traj_point_achieved.sum(dim=1)/100 - 1) * 300
+        reward += traj_progress_reward
+        self.reward_log[7] = traj_progress_reward[0]
         # # 高度下降惩罚
         # reward += (0.5-p_l[:, 2]) * -1 
         # 终点距离奖励
@@ -342,10 +400,11 @@ class RLGamesEnv:
         #     reward += 100 * dt
     
         # 动作平滑奖励
-        self.action_smoothness *= 0.0005
+        self.action_smoothness *= 0.1
         # progress_reward = self.config.get("progress_reward", 1)
         # reward += progress_reward * dt
-        # reward += self.action_smoothness
+        reward += self.action_smoothness
+        self.reward_log[6] = self.action_smoothness[0]
         # print(f"action_smoothness: {self.action_smoothness[0].item():.4f}, end_pos_reward: {self.end_pos_reward[0].item():.4f}")
         # print(f"Reward components : {reward_pos.mean().item():.6f}, {reward_vel.mean().item():.6f}, {reward_quat.mean().item():.6f}, {reward_omega.mean().item():.6f}")
         
@@ -396,7 +455,7 @@ class RLGamesEnv:
             payload_xy = current_pos[:, :2].unsqueeze(1)       # (B, 1, 2)
             dist_to_obs = torch.norm(payload_xy - obs_pos, dim=2)  # (B, N)
             min_dist, _ = torch.min(dist_to_obs, dim=1)            # (B,)
-            done |= (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance))
+            # done |= (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance))
             # if (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance)).any():
             #     print("Min distances from payload to obstacles:", min_dist)
             self.env_done[done] += 1
@@ -405,7 +464,8 @@ class RLGamesEnv:
             obs_pos = obs_pos.unsqueeze(1)                     # (B, 1, N, 2)
             dist_to_obs = torch.norm(drone_xy - obs_pos, dim=3)  # (B, N_cables, N)
             min_dist, _ = torch.min(dist_to_obs, dim=2)          # (B, N_cables)
-            done |= (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any(dim=1)
+            self.min_drone_load_dist = min_dist.min(dim=1).values - self.drone_radius - self.r_payload  # (B,)
+            # done |= (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any(dim=1)
             # if (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any():
             #     print("Min distances from drones to obstacles:", min_dist)
             self.env_done[done] += 1
@@ -424,10 +484,13 @@ class RLGamesEnv:
         mask = ~torch.eye(N, dtype=torch.bool, device=dist.device).unsqueeze(0)  # (1, N, N)
         dist_masked = dist.masked_fill(~mask, float('inf'))  # 自身距离设为无穷大
         # 判断是否碰撞：任意两架无人机的距离小于安全阈值则判定碰撞
-        collision_threshold = 3 * self.drone_radius + self.collision_tolerance
+        collision_threshold = 2.5 * self.drone_radius + self.collision_tolerance
+        self.min_drone_drone_dist = dist_masked.min(dim=2).values.min(dim=1).values - self.drone_radius * 2
+
         collision = dist_masked < collision_threshold  # (B, N, N)
         # 若任意两架无人机碰撞，则该环境 done = True
-        done |= collision.any(dim=(1, 2))
+        # done |= collision.any(dim=(1, 2))
+        
         self.env_done[done] += 1
 
                     
@@ -693,7 +756,7 @@ class RLGamesEnv:
                      f'Steps: {self.step_counters[0].item()} | '
                      f'Progress: {traj_progress_value}/{len(self.ref_traj["Ref_xl"])-1}'
                      f' | Reward: {env1_Reward:.2f}' f' | Env1 Done: {self.env_done[0]}', fontsize=14)
-        ax.legend()
+        ax.legend(loc='lower right')
         ax.grid(True)
 
         ax.set_xlim([-1,3])
@@ -782,12 +845,12 @@ class RLGamesEnv:
             except Exception:
                 pass
 
-            ax2.legend(loc='upper right')
+            ax2.legend(loc='lower right')
             filename_2d = f"payload_trajectory_env0_topdown_{timestamp}_steps{self.step_counters[0].item()}.png"
             filepath_2d = os.path.join(save_dir, filename_2d)
             plt.tight_layout()
             plt.savefig(filepath_2d, dpi=300, bbox_inches='tight')
-            plt.close()
+            plt.close()   
             print(f"Environment 0 top-down view saved to: {filepath_2d}")
         except Exception as e:
             print(f"Failed to create top-down view: {e}")

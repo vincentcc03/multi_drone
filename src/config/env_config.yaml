@@ -11,12 +11,12 @@ g: 10                   # 重力加速度
 r_payload: 0.25        # 负载半径 (m)
 
 # 绳子参数
-rope_num: 6
+rope_num: 4
 rope_length: 1.0          # 绳长 (m)
 rl : 0.25                 # 绳子连接点圆的半径
 
 # 绳子初始张力
-cable_initial_tensions: 5.16397       # 初始张力 (N) - 平衡负载重量
+cable_initial_tensions: 7.7463       # 初始张力 (N) - 平衡负载重量
 
 #无人机半径
 drone_radius: 0.125         # 无人机半径 (m)
@@ -32,10 +32,10 @@ vel_weight: 1          # 速度权重
 quat_weight: 0.3       # 姿态权重
 omega_weight: 0.1      # 角速度权重
 
-pos_reward_scale: 1    # 位置误差缩放（值越大，对误差越敏感）
-vel_reward_scale: 1   # 速度误差缩放
-quat_reward_scale: 1  # 姿态误差缩放
-omega_reward_scale: 1  # 角速度误差缩放
+pos_reward_scale: 2    # 位置误差缩放（值越大，对误差越敏感）
+vel_reward_scale: 2   # 速度误差缩放
+quat_reward_scale: 2  # 姿态误差缩放
+omega_reward_scale: 2  # 角速度误差缩放
 
 progress_reward: 0.2     # 轨迹进展奖励
 collision_penalty: -10.0 # 碰撞惩罚
