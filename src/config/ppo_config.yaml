@@ -62,10 +62,10 @@ params:
     horizon_length: 128
     minibatch_size: 1024
     mini_epochs: 5
-    max_epochs: 10000
+    max_epochs: 100000
 
     # === Learning rate ===
-    learning_rate: 5e-4      # Actor LR
+    learning_rate: 3e-4      # Actor LR
     lr_schedule: constant
 
     # === PPO hyperparams ===

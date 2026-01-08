@@ -48,7 +48,7 @@ class PayloadDynamicsSimBatch:
         p_dot = torch.bmm(R_l, v_l.unsqueeze(-1)).squeeze(-1)  # (B,3)
 
         # ------------------ v_dot ------------------
-        r_g_exp = self.r_g.unsqueeze(0).expand(B, 3)  # (B,3)
+        r_g_exp =  self.r_g.unsqueeze(0).expand(B, 3)  # (B,3)
         omega_hat = hat(self.omega_dot)                 # (B,3,3)
         
         omega_cross_rg = torch.bmm(omega_hat, r_g_exp.unsqueeze(-1)).squeeze(-1)           # (B,3)

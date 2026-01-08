@@ -1,0 +1,17 @@
+Training Log
+Start Time: 2025-12-29 19:49:32
+Num Actors: 4096
+Horizon Length: 128
+Minibatch Size: 1024
+Mini Epochs: 5
+Learning Rate: 3e-4
+E-Clip: 0.2
+Gamma: 0.99
+Tau: 0.95
+Max Epochs: 100000
+Position Error Threshold: 0.15
+Position Error Count: 5
+Progress Reward: 0.2
+--------------------------------------------------
+max_progress,env1_Reward,Position,Velocity,Quaternion,Angular_Velocity,Timestamp,drone_payload,drone_drone,Action_Smoothness,Trajectory_Progress_Reward
+0,0.000000,2025-12-29 19:49:32,0.0,0.0,0.0,0.0,0.000000,0.000000,0.000000,0.000000
