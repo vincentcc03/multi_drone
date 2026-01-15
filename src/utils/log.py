@@ -56,17 +56,24 @@ class TrainingLogger:
             f.write("-" * 50 + "\n")
             f.write("max_progress,env1_Reward,Position,Velocity,Quaternion,Angular_Velocity,Timestamp,drone_payload,drone_drone,Action_Smoothness,Trajectory_Progress_Reward\n")
 
-    def log_step(self, max_progress, env1_reward, pos, vel, quat, omega, drone_payload, drone_drone, action_smoothness, traj_progress_reward):
+    def log_step(self, traj_progress, pos, vel, quat, omega, drone_payload, drone_drone, action_smoothness, traj_progress_reward):
         """
         记录单步训练数据
         
         Args:
-            max_progress: 当前步数
-            max_reward: 最大奖励
+            traj_progress: 当前轨迹进度
+            pos: 位置奖励
+            vel: 速度奖励
+            quat: 四元数奖励
+            omega: 角速度奖励
+            drone_payload: 无人机负载奖励
+            drone_drone: 无人机间奖励
+            action_smoothness: 动作平滑度奖励
+            traj_progress_reward: 轨迹进度奖励
         """
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(self.log_file, 'a') as f:
-            f.write(f"{max_progress},{env1_reward:.6f},{timestamp},{pos},{vel},{quat},{omega},{drone_payload:.6f},{drone_drone:.6f},{action_smoothness:.6f},{traj_progress_reward:.6f}\n")
+            f.write(f"{traj_progress},{pos:.6f},{vel:.6f},{quat:.6f},{omega:.6f},{drone_payload:.6f},{drone_drone:.6f},{action_smoothness:.6f},{traj_progress_reward:.6f}\n")
 
     def log_episode(self, episode, max_reward, episode_reward=None):
         """
