@@ -1,0 +1,14 @@
+# python
+__pycache__/
+*.pyc
+
+# logs & outputs
+log/
+runs/
+results/
+nohup.out
+*.tfevents*
+
+# models
+*.pth
+log/

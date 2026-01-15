@@ -165,6 +165,6 @@ if __name__ == "__main__":
     ]
     start_continuous_monitoring(
         folders=folders_to_monitor,
-        threshold=100,
+        threshold=1000,
         check_interval=60  # 每60秒检查一次
     )
