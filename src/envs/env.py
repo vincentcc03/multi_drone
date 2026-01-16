@@ -21,6 +21,9 @@ ENABLE_PRINT = False  # 设置为False即可关闭所有print
 # 控制可视化的开关
 ENABLE_VISUALIZATION = True  # 设置为False即可关闭所有可视化
 
+# 控制俯视图的开关
+ENABLE_TOP_VIEW = False  # 设置为False即可关闭俯视图绘制
+
 # 重定义print函数
 if not ENABLE_PRINT:
     def print(*args, **kwargs):
@@ -137,17 +140,6 @@ class RLGamesEnv:
         reset_mask = self.done  # (B,) boolean tensor
         
         if reset_mask.any():
-            self.logger.log_step(
-                self.achieve_num.max().item(), 
-                self.reward_log[0].item(), 
-                self.reward_log[1].item(), 
-                self.reward_log[2].item(), 
-                self.reward_log[3].item(), 
-                self.reward_log[4].item(), 
-                self.reward_log[5].item(),
-                self.reward_log[6].item(),
-                self.reward_log[7].item()
-            )
         
             # 向量化重置（性能更好）
             if reset_mask[0]:  # 如果第一个环境需要重置，清空其轨迹记录器
@@ -158,9 +150,9 @@ class RLGamesEnv:
             # ========== 核心修改：根据current_point_indices获取对应参考位置 ==========
             # 1. 生成随机的索引（1-10 或 90-100）
             choices = torch.randint(0, 4, size=(num_reset,), device=self.device) # 0,1,2,3
-            front_start_point = torch.randint(0, 41, size=(num_reset,), device=self.device)  # 1-10
+            front_start_point = torch.randint(0, 1, size=(num_reset,), device=self.device)  # 1-10
             back_start_point = torch.randint(60, 101, size=(num_reset,), device=self.device)  # 90-100
-            random_nums = torch.where(choices == 0, back_start_point, front_start_point)
+            random_nums = torch.where(choices == 5, back_start_point, front_start_point)
             self.current_point_indices[reset_mask] = random_nums
             print("Random indices for reset environments:", random_nums)
             
@@ -175,7 +167,7 @@ class RLGamesEnv:
             payload_init_expanded = self.payload_init_state.unsqueeze(0).repeat(num_reset, 1).to(self.device)
             # 替换位置部分（前3维）为参考轨迹的对应位置
             payload_init_expanded[:, 0:3] = payload_init_custom
-            print("Payload initial states for reset environments:", payload_init_expanded)
+            # print("Payload initial states for reset environments:", payload_init_expanded)
             # 电缆初始状态保持不变
             cable_init_expanded = self.cable_init_state.unsqueeze(0).expand(num_reset, -1, -1).to(self.device)
             
@@ -268,6 +260,18 @@ class RLGamesEnv:
             self._record_payload_trajectories()
 
         obs = self._get_obs()
+        self.logger.log_step(
+                self.achieve_num[0].item(), 
+                self.reward[0].item(),
+                self.reward_log[0].item(), 
+                self.reward_log[1].item(), 
+                self.reward_log[2].item(), 
+                self.reward_log[3].item(), 
+                self.reward_log[4].item(), 
+                self.reward_log[5].item(),
+                self.reward_log[6].item(),
+                self.reward_log[7].item()
+            )
         
         return obs, reward, self.done, info
 
@@ -292,9 +296,9 @@ class RLGamesEnv:
         omega_l = state[:, 10:13]   # (B, 3)
 
         # === 2. 批量计算索引 ===
-        lead_point = torch.clamp(self.current_point_indices+10, max=100)  # (B,)
+        lead_point = torch.clamp(self.current_point_indices+20, max=100)  # (B,)
         # next_id = torch.clamp(self.current_point_indices+1, max=100)  # (B,)
-        print(f"Next indices: {lead_point}")
+        # print(f"Next indices: {lead_point}")
         # === 3. 批量 gather 对应轨迹点 ===
         ref_xl_batch = self.ref_xl[lead_point]  # (B, 13)
         # p_l_ref2 = self.ref_xl[next_id][:, 0:3]
@@ -312,7 +316,9 @@ class RLGamesEnv:
         reached_mask = self.pos_error_all < 0.1  # (B, T) bool tensor
         self.traj_point_achieved[reached_mask] = True
         achieve_num = self.traj_point_achieved.sum(dim=1)  # (B,)
-        new_point_reward = (achieve_num - self.achieve_num).float() * 20.0
+        new_point_reward = (achieve_num - self.achieve_num).float() * 10
+        # 如果achieve_num没达到17就不给奖励
+        new_point_reward = torch.where(achieve_num < 20, torch.zeros_like(new_point_reward), new_point_reward)
         self.achieve_num = achieve_num
         reward = new_point_reward
         self.reward_log[7] = new_point_reward[0]
@@ -338,11 +344,13 @@ class RLGamesEnv:
         # 位置奖励：指数衰减
         pos_scale = self.config.get("pos_reward_scale")  # 距离缩放系数
         reward_pos = self.pos_w * torch.exp(-3*pos_error) * pos_scale
+        # 当current_point_indices小于25时，奖励只有0.1倍
+        reward_pos = torch.where(self.achieve_num < 20, reward_pos * 0.1, reward_pos)
         
         # 速度奖励：指数衰减
         vel_scale = self.config.get("vel_reward_scale")
         reward_vel = self.vel_w * torch.exp(-3*vel_error) * vel_scale
-
+        reward_vel = torch.where(self.achieve_num < 20, reward_vel * 0.1, reward_vel)
         # 姿态奖励：指数衰减
         quat_scale = self.config.get("quat_reward_scale")  # 四元数误差通常较小
         reward_quat = self.quat_w * torch.exp(-3*quat_error) * quat_scale
@@ -362,10 +370,12 @@ class RLGamesEnv:
         # self.last_omega_error = omega_error.clone()
         # 无人机负载间距惩罚：当距离小于0.1m才有惩罚，使用线性惩罚
         distance_threshold = 0.1
-        drone_load_dist_reward = -torch.relu(distance_threshold - self.min_drone_load_dist) * 10
+        drone_load_dist_reward = -torch.relu(distance_threshold - self.min_drone_load_dist) * 20
+        drone_load_dist_reward *= 0
         reward += drone_load_dist_reward
         # 无人机间距惩罚：当距离小于0.1m才有惩罚，使用线性惩罚
-        drone_drone_dist_reward = -torch.relu(distance_threshold - self.min_drone_drone_dist) * 10
+        drone_drone_dist_reward = -torch.relu(distance_threshold - self.min_drone_drone_dist) * 20
+        drone_drone_dist_reward *= 0
         reward += drone_drone_dist_reward
         
         # 角度惩罚
@@ -414,6 +424,7 @@ class RLGamesEnv:
     
         # 动作平滑奖励
         self.action_smoothness *= 0.1
+        self.action_smoothness *= 0
         # progress_reward = self.config.get("progress_reward", 1)
         # reward += progress_reward * dt
         reward += self.action_smoothness
@@ -777,8 +788,8 @@ class RLGamesEnv:
         ax.set_ylim([-1,3])
         ax.set_zlim([0, 1])
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename_3d = f"payload_trajectory_env0_{timestamp}_steps{self.step_counters[0].item()}.png"
+        timestamp = datetime.now().strftime("%m%d_%H%M%S")
+        filename_3d = f"{timestamp}.png"
         filepath_3d = os.path.join(save_dir, filename_3d)
 
         plt.tight_layout()
@@ -788,6 +799,12 @@ class RLGamesEnv:
         print(f"Environment 0 payload trajectory saved to: {filepath_3d}")
 
         # ----- 俯视图（Top-down XY） -----
+        if not ENABLE_TOP_VIEW:
+            # 清空轨迹记录
+            self.payload_traj_list[0].clear()
+            print("Environment 0 trajectory record cleared (top view disabled)")
+            return
+
         try:
             fig2, ax2 = plt.subplots(figsize=(8, 8))
 

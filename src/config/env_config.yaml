@@ -27,10 +27,10 @@ obstacle_pos:             # 障碍物位置 (只有x,y坐标，z假设为负载�
 obstacle_r: 0.5           # 障碍物半径 (m)
 
 # 在你的config文件中添加这些参数
-pos_weight: 1.5          # 位置权重
+pos_weight: 2          # 位置权重
 vel_weight: 1          # 速度权重
-quat_weight: 0.3       # 姿态权重
-omega_weight: 0.1      # 角速度权重
+quat_weight: 0       # 姿态权重
+omega_weight: 0      # 角速度权重
 
 pos_reward_scale: 2    # 位置误差缩放（值越大，对误差越敏感）
 vel_reward_scale: 2   # 速度误差缩放

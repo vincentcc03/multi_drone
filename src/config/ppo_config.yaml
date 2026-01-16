@@ -31,7 +31,7 @@ params:
 
     # 兼容 rl_games 老接口：添加 mlp 字段（用于 network_builder）
     mlp:
-      units: [1024, 512, 256, 128]
+      units: [512, 256, 128]
       activation: relu
       d2rl: False
       initializer:
@@ -62,7 +62,8 @@ params:
     horizon_length: 128
     minibatch_size: 1024
     mini_epochs: 5
-    max_epochs: 100000
+    max_epochs: 10000
+
 
     # === Learning rate ===
     learning_rate: 3e-4      # Actor LR

@@ -54,9 +54,9 @@ class TrainingLogger:
             f.write(f"Position Error Count: {pos_error_count}\n")
             f.write(f"Progress Reward: {progress_reward}\n")
             f.write("-" * 50 + "\n")
-            f.write("max_progress,env1_Reward,Position,Velocity,Quaternion,Angular_Velocity,Timestamp,drone_payload,drone_drone,Action_Smoothness,Trajectory_Progress_Reward\n")
+            f.write("max_progress,env1_Reward,Position,Velocity,Quaternion,Angular_Velocity,drone_payload,drone_drone,Action_Smoothness,Trajectory_Progress_Reward\n")
 
-    def log_step(self, traj_progress, pos, vel, quat, omega, drone_payload, drone_drone, action_smoothness, traj_progress_reward):
+    def log_step(self, traj_progress,reward1, pos, vel, quat, omega, drone_payload, drone_drone, action_smoothness, traj_progress_reward):
         """
         记录单步训练数据
         
@@ -71,9 +71,9 @@ class TrainingLogger:
             action_smoothness: 动作平滑度奖励
             traj_progress_reward: 轨迹进度奖励
         """
-        # timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now().strftime("%m-%d %H:%M:%S")
         with open(self.log_file, 'a') as f:
-            f.write(f"{traj_progress},{pos:.6f},{vel:.6f},{quat:.6f},{omega:.6f},{drone_payload:.6f},{drone_drone:.6f},{action_smoothness:.6f},{traj_progress_reward:.6f}\n")
+            f.write(f"{timestamp},{traj_progress},{reward1:.6f},{pos:.6f},{vel:.6f},{quat:.6f},{omega:.6f},{drone_payload:.6f},{drone_drone:.6f},{action_smoothness:.6f},{traj_progress_reward:.6f}\n")
 
     def log_episode(self, episode, max_reward, episode_reward=None):
         """
@@ -84,7 +84,7 @@ class TrainingLogger:
             max_reward: 最大奖励
             episode_reward: 回合奖励（可选）
         """
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now().strftime("%m-%d %H:%M:%S")
         with open(self.log_file, 'a') as f:
             if episode_reward is not None:
                 f.write(f"Episode {episode},{max_reward:.6f},{episode_reward:.6f},{timestamp}\n")
