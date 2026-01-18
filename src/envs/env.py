@@ -22,7 +22,7 @@ ENABLE_PRINT = False  # 设置为False即可关闭所有print
 ENABLE_VISUALIZATION = True  # 设置为False即可关闭所有可视化
 
 # 控制俯视图的开关
-ENABLE_TOP_VIEW = False  # 设置为False即可关闭俯视图绘制
+ENABLE_TOP_VIEW = True  # 设置为False即可关闭俯视图绘制
 
 # 重定义print函数
 if not ENABLE_PRINT:
@@ -49,7 +49,7 @@ class RLGamesEnv:
         self.angles = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.pos_error_all = torch.zeros(self.num_envs, 101, dtype=torch.float32, device=self.device)
         self.achieve_num = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.min_drone_load_dist = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.min_drone_obstacle_dist = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.min_drone_drone_dist = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.traj_point_achieved = torch.zeros(self.num_envs, 101, dtype=torch.bool, device=self.device) #(B, 101)轨迹点达成情况
         # 动力学仿真器
@@ -296,7 +296,7 @@ class RLGamesEnv:
         omega_l = state[:, 10:13]   # (B, 3)
 
         # === 2. 批量计算索引 ===
-        lead_point = torch.clamp(self.current_point_indices+20, max=100)  # (B,)
+        lead_point = torch.clamp(self.current_point_indices+3, max=100)  # (B,)
         # next_id = torch.clamp(self.current_point_indices+1, max=100)  # (B,)
         # print(f"Next indices: {lead_point}")
         # === 3. 批量 gather 对应轨迹点 ===
@@ -368,14 +368,24 @@ class RLGamesEnv:
         # self.last_vel_error = vel_error.clone()
         # self.last_quat_error = quat_error.clone()
         # self.last_omega_error = omega_error.clone()
-        # 无人机负载间距惩罚：当距离小于0.1m才有惩罚，使用线性惩罚
+        # 无人机负载间距惩罚：当距离小于0.1m才有惩罚，给予-5惩罚
         distance_threshold = 0.1
-        drone_load_dist_reward = -torch.relu(distance_threshold - self.min_drone_load_dist) * 20
-        drone_load_dist_reward *= 0
-        reward += drone_load_dist_reward
-        # 无人机间距惩罚：当距离小于0.1m才有惩罚，使用线性惩罚
-        drone_drone_dist_reward = -torch.relu(distance_threshold - self.min_drone_drone_dist) * 20
-        drone_drone_dist_reward *= 0
+        drone_obstacle = self.min_drone_obstacle_dist  # (B,)
+        drone_obstacle_reward = torch.where(
+            drone_obstacle < distance_threshold,
+            torch.full_like(drone_obstacle, -5.0),
+            torch.zeros_like(drone_obstacle)
+        )
+        # drone_obstacle_reward *= 0
+        reward += drone_obstacle_reward
+        # 无人机间距惩罚：当距离小于0.1m才有惩罚，-5
+        drone_drone_dist = self.min_drone_drone_dist  # (B,)
+        drone_drone_dist_reward = torch.where(
+            drone_drone_dist < distance_threshold,
+            torch.full_like(drone_drone_dist, -5.0),
+            torch.zeros_like(drone_drone_dist)
+        )
+        # drone_drone_dist_reward *= 0
         reward += drone_drone_dist_reward
         
         # 角度惩罚
@@ -384,7 +394,7 @@ class RLGamesEnv:
         # 高度惩罚
         height_reward = -abs(0.5 - p_l[:, 2])
         # reward += height_reward * 0.1
-        self.reward_log[4] = drone_load_dist_reward[0]
+        self.reward_log[4] = drone_obstacle_reward[0]
         self.reward_log[5] = drone_drone_dist_reward[0]
         
         
@@ -479,7 +489,7 @@ class RLGamesEnv:
             payload_xy = current_pos[:, :2].unsqueeze(1)       # (B, 1, 2)
             dist_to_obs = torch.norm(payload_xy - obs_pos, dim=2)  # (B, N)
             min_dist, _ = torch.min(dist_to_obs, dim=1)            # (B,)
-            # done |= (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance))
+            done |= (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance))
             # if (min_dist < (self.r_payload + self.obstacle_r + self.collision_tolerance)).any():
             #     print("Min distances from payload to obstacles:", min_dist)
             self.env_done[done] += 1
@@ -488,8 +498,8 @@ class RLGamesEnv:
             obs_pos = obs_pos.unsqueeze(1)                     # (B, 1, N, 2)
             dist_to_obs = torch.norm(drone_xy - obs_pos, dim=3)  # (B, N_cables, N)
             min_dist, _ = torch.min(dist_to_obs, dim=2)          # (B, N_cables)
-            self.min_drone_load_dist = min_dist.min(dim=1).values - self.drone_radius - self.r_payload  # (B,)
-            # done |= (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any(dim=1)
+            self.min_drone_obstacle_dist = min_dist.min(dim=1).values - self.drone_radius - self.r_payload  # (B,)
+            done |= (self.min_drone_obstacle_dist < 0.01)
             # if (min_dist < (self.drone_radius + self.obstacle_r + self.collision_tolerance)).any():
             #     print("Min distances from drones to obstacles:", min_dist)
             self.env_done[done] += 1
@@ -513,7 +523,7 @@ class RLGamesEnv:
 
         collision = dist_masked < collision_threshold  # (B, N, N)
         # 若任意两架无人机碰撞，则该环境 done = True
-        # done |= collision.any(dim=(1, 2))
+        done |= collision.any(dim=(1, 2))
         
         self.env_done[done] += 1
 
@@ -677,7 +687,11 @@ class RLGamesEnv:
         attach_world = None
         p_load = None
         try:
-            p_load = self.payload.state[0, 0:3].cpu().numpy()
+            # 使用轨迹的最后一点作为负载圆心，确保与轨迹终点重合
+            if len(self.payload_traj_list[0]) > 0:
+                p_load = self.payload_traj_list[0][-1]  # 使用轨迹最后一点
+            else:
+                p_load = self.payload.state[0, 0:3].cpu().numpy()
             q_load = self.payload.state[0, 6:10].unsqueeze(0)
             R_l = quat_to_rot(q_load).squeeze(0).cpu().numpy()
             circle_radius = float(self.r_payload) if hasattr(self, 'r_payload') and self.r_payload is not None else 0.2
@@ -786,7 +800,7 @@ class RLGamesEnv:
 
         ax.set_xlim([-1,3])
         ax.set_ylim([-1,3])
-        ax.set_zlim([0, 1])
+        ax.set_zlim([0, 4])
 
         timestamp = datetime.now().strftime("%m%d_%H%M%S")
         filename_3d = f"{timestamp}.png"
