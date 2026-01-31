@@ -82,6 +82,7 @@ class RLGamesEnv:
         self.action_smoothness_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.first_reach_reward = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self.traj_progress = torch.zeros(self.num_envs, dtype=torch.long, device=self.device) #每一个环境的轨迹点最新位置
+        self.traj_reward_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device) #每个环境traj_reward满足条件的次数
 
         # 可视化
         self.visualizer = DroneVisualization()
@@ -193,6 +194,7 @@ class RLGamesEnv:
             self.angles[reset_mask] = 0.0
             self.achieve_num[reset_mask] = 0
             self.traj_point_achieved[reset_mask] = False
+            self.traj_reward_count[reset_mask] = 0
             
             # 重置计数器（确保interval是整数，避免类型不匹配）
             self.step_counters[reset_mask] = self.current_point_indices[reset_mask] * self.interval
@@ -221,7 +223,7 @@ class RLGamesEnv:
         self.action = action
         print("Action:", self.action[0])
 
-        # 动力学仿真
+        # 动力学仿真,一次推进5步
         self.cable.rk4_step(action)
         
         q_l = self.payload.state[:, 6:10]
@@ -312,7 +314,7 @@ class RLGamesEnv:
         omega_l = state[:, 10:13]   # (B, 3)
 
         # === 2. 批量计算索引 ===
-        lead_point1 = torch.clamp(self.current_point_indices, max=100)  # (B,)
+        lead_point1 = torch.clamp(self.current_point_indices+1, max=100)  # (B,)
         lead_point2 = torch.clamp(self.current_point_indices+3, max=100)  # (B,)
         lead_point3 = torch.clamp(self.current_point_indices+5, max=100)
         # next_id = torch.clamp(self.current_point_indices+1, max=100)  # (B,)
@@ -379,12 +381,15 @@ class RLGamesEnv:
         # print(f"Quaternion errors: {quat_error}")
         # print(f"Omega errors: {omega_error}")
         
-        # 10开始，每隔十个点检测一次有没有跟踪上，如果跟踪上了就给较大奖励
+        # 10开始，每隔三个点检测一次有没有跟踪上，如果跟踪上了就给较大奖励
+        traj_reward_mask = (self.step_counters % 30 == 0) & (self.step_counters>100) & (self.pos_error_1 < 0.1)
         traj_reward = torch.where(
-            (self.step_counters % 80 == 0) & (self.step_counters>100) & (self.pos_error_1 < 0.1),
+            traj_reward_mask,
             torch.full_like(self.pos_error_1, 10.0),
             torch.zeros_like(self.pos_error_1)
         )
+        # 统计每个环境满足traj_reward条件的次数
+        self.traj_reward_count += traj_reward_mask.long()
 
         reward += traj_reward
 
@@ -872,11 +877,12 @@ class RLGamesEnv:
         ax.set_zlabel('Z (m)')
         traj_progress_value = self.traj_progress[0].item()
         env1_Reward = self.reward[0].item()
+        traj_reward_satisfied = self.traj_reward_count[0].item()
         common_title = (
             f'Payload Trajectory - Environment 0\n'
             f'Steps: {self.step_counters[0].item()} | '
             f'Progress: {self.achieve_num[0].item()}'
-            f' | Reward: {env1_Reward:.2f} | Env1 Done: {self.env_done[0]}'
+            f' | TrajReward: {traj_reward_satisfied} | Reward: {env1_Reward:.2f} | Env1 Done: {self.env_done[0]}'
         )
         ax.set_title(common_title, fontsize=14)
         
