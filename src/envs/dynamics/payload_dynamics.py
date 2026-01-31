@@ -12,9 +12,21 @@ class PayloadDynamicsSimBatch:
     
         
         # 设置负载参数
-        self.m_l = config.get("m_l", 1.0)
-        J_l_value = config.get("J_l", 0.15)
-        self.J_l = torch.eye(3, device=self.device) * J_l_value
+        self.m_l = config.get("m_l", 3.0)
+        self.rl = config.get("r_l", 0.25)
+        # 主转动惯量（薄圆盘）
+        I_x = 0.25 * self.m_l * self.rl ** 2
+        I_y = 0.25 * self.m_l * self.rl ** 2
+        I_z = 0.50 * self.m_l * self.rl ** 2
+
+        # 转动惯量张量（质心系 + 主轴系）
+        self.J_l = torch.diag(
+            torch.tensor([I_x, I_y, I_z], device=self.device)
+        )
+        self.J_l = torch.diag(
+            torch.tensor([6.0,6.0,6.0], device=self.device)
+        )
+        # 逆
         self.j_inv = torch.linalg.inv(self.J_l)
         
         r_g = config.get("r_g", [0.1, 0, 0])
@@ -76,6 +88,7 @@ class PayloadDynamicsSimBatch:
         return torch.cat([p_dot, v_dot, q_dot, omega_dot], dim=1)  # (B,13)
 
 
+
     def rk4_step(self, input_force_torque):
         state = self.state
         dt = self.dt
@@ -84,5 +97,7 @@ class PayloadDynamicsSimBatch:
         k3 = self.dynamics(state + 0.5 * dt * k2, input_force_torque)
         k4 = self.dynamics(state + dt * k3, input_force_torque)
         self.state = state + (dt/6.0)*(k1 + 2*k2 + 2*k3 + k4)
-        self.state[:,6:10] = self.state[:,6:10] / self.state[:,6:10].norm(dim=1, keepdim=True)
+        # 保证四元数为单位向量
+        quat_norm = self.state[:,6:10].norm(dim=1, keepdim=True) + 1e-8
+        self.state[:,6:10] = self.state[:,6:10] / quat_norm
         return self.state.clone()

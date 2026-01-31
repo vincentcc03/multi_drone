@@ -94,7 +94,7 @@ class FolderMonitor:
         if self.is_running:
             print("监控已在运行中")
             return
-            
+              
         self.is_running = True
         self.monitor_thread = threading.Thread(target=self.monitor_loop)
         self.monitor_thread.daemon = True
@@ -112,7 +112,7 @@ def clear_folder_if_too_many_images(folder_path, threshold=100):
     monitor = FolderMonitor(folder_path, threshold)
     monitor.check_and_clean()
 
-def start_continuous_monitoring(folders=None, threshold=100, check_interval=60):
+def start_continuous_monitoring(folders=None,  threshold=100, check_interval=60):
     """启动多文件夹持续监控"""
     if folders is None:
         folders = ["results/payload", "results/ppo"]
@@ -165,6 +165,6 @@ if __name__ == "__main__":
     ]
     start_continuous_monitoring(
         folders=folders_to_monitor,
-        threshold=1000,
+        threshold=200,
         check_interval=60  # 每60秒检查一次
     )
