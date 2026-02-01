@@ -7,8 +7,18 @@ log/
 runs/
 results/
 nohup.out
+*.out
 *.tfevents*
+*.txt
 
 # models
 *.pth
-log/
+*.ckpt
+*.pb
+*.h5
+
+# large data files
+*.npy
+*.npz
+*.pkl
+*.pickle
