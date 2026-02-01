@@ -223,30 +223,40 @@ class RLGamesEnv:
         self.action = action
         print("Action:", self.action[0])
 
-        # 动力学仿真,一次推进5步
-        self.cable.rk4_step(action)
-        
-        q_l = self.payload.state[:, 6:10]
-        R_l = quat_to_rot(q_l)
-        input_force_torque = self.cable.compute_force_torque(R_l)
-        print("Input force and torque to payload:", input_force_torque[0])
-        self.payload.rk4_step(input_force_torque)
-
-        print("Payload state:", self.payload.state[0])
-        # 检查负载和绳子状态是否有NaN，返回是第几个状态量有NaN
-        nan_payload = torch.isnan(self.payload.state).any()
-        nan_payload_indices = torch.isnan(self.payload.state).nonzero(as_tuple=True)
-        nan_cable = torch.isnan(self.cable.state).any()
-        if nan_payload :
-            print("NaN detected in payload!")
-            print("NaN indices in payload state:", nan_payload_indices)
-        if nan_cable:
-            print("NaN detected in cable!")
+        # 动力学仿真,一次推进4步
+        for _ in range(4):
+            self.cable.rk4_step(action)
             
+            q_l = self.payload.state[:, 6:10]
+            R_l = quat_to_rot(q_l)
+            input_force_torque = self.cable.compute_force_torque(R_l)
+            print("Input force and torque to payload:", input_force_torque[0])
+            self.payload.rk4_step(input_force_torque)
+
+            print("Payload state:", self.payload.state[0])
+            # 检查负载和绳子状态是否有NaN，返回是第几个状态量有NaN
+            nan_payload = torch.isnan(self.payload.state).any()
+            nan_payload_indices = torch.isnan(self.payload.state).nonzero(as_tuple=True)
+            nan_cable = torch.isnan(self.cable.state).any()
+            if nan_payload :
+                print("NaN detected in payload!")
+                print("NaN indices in payload state:", nan_payload_indices)
+            if nan_cable:
+                print("NaN detected in cable!")
+            # 更新环境计数器
+            self.step_counters += 1
+            # 打印所有环境当前步数
+            print(f"Current step: {self.step_counters}")
+            # 可视化记录轨迹
+            current_time = self.step_counters[0] * self.dt
+            # print(f"Current sim time: {current_time:.2f}s")
+            if ENABLE_VISUALIZATION and current_time*100 % 4 == 0:
+                print(f"Visualizing at sim time: {current_time:.2f}s")
+                # self._visualize_current_state()
+                self._record_payload_trajectories()
+                
         # 计算无人机位置
         self.compute_drone_positions()
-        
-        
 
         # 奖励 + done
         self.done , info = self._check_done()
@@ -256,27 +266,10 @@ class RLGamesEnv:
         # max_reward = self.reward.max().item()
         # print(f"max reward: {max_reward}")
         self.reset()
-        
-        
-        
-        # 更新环境计数器
-        self.step_counters += 1
-        # 打印所有环境当前步数
-        print(f"Current step: {self.step_counters}")
-        
-        # 检查哪些环境需要更新轨迹点
+        # 检查哪些9U环境需要更新轨迹点
         update_mask = (self.step_counters % int(self.interval) == 0)
         self.current_point_indices[update_mask] += 1
         print(f"Current point indices: {self.current_point_indices}")
-        
-        # 可视化
-        current_time = self.step_counters[0] * self.dt
-        # print(f"Current sim time: {current_time:.2f}s")
-        if ENABLE_VISUALIZATION and current_time*100 % 4 == 0:
-            print(f"Visualizing at sim time: {current_time:.2f}s")
-            # self._visualize_current_state()
-            self._record_payload_trajectories()
-
         obs = self._get_obs()
         self.logger.log_step(
                 self.achieve_num[0].item(), 
@@ -290,7 +283,6 @@ class RLGamesEnv:
                 self.reward_log[6].item(),
                 self.reward_log[7].item()
             )
-        
         return obs, reward, self.done, info
 
     def get_number_of_agents(self):
@@ -351,12 +343,12 @@ class RLGamesEnv:
         max_id = (self.traj_point_achieved * idx).max(dim=1).values
         achieve_num = self.traj_point_achieved.sum(dim=1)  # (B,)
         mask = max_id > pre_max_idx
-        new_point_reward = mask.float() * 1.5
+        new_point_reward = mask.float() * 10
         # 如果achieve_num没达到17就不给奖励
         new_point_reward = torch.where(achieve_num < 20, torch.zeros_like(new_point_reward), new_point_reward)
         self.achieve_num = achieve_num
-        reward = new_point_reward * 0
-        # self.reward_log[7] = new_point_reward[0]
+        reward = new_point_reward 
+        self.reward_log[7] = new_point_reward[0]
         
         
 
@@ -382,10 +374,10 @@ class RLGamesEnv:
         # print(f"Omega errors: {omega_error}")
         
         # 10开始，每隔三个点检测一次有没有跟踪上，如果跟踪上了就给较大奖励
-        traj_reward_mask = (self.step_counters % 30 == 0) & (self.step_counters>100) & (self.pos_error_1 < 0.1)
+        traj_reward_mask = (self.step_counters % 80 == 0) & (self.step_counters>100) & (self.pos_error_1 < 0.1)
         traj_reward = torch.where(
             traj_reward_mask,
-            torch.full_like(self.pos_error_1, 10.0),
+            torch.full_like(self.pos_error_1, 20.0),
             torch.zeros_like(self.pos_error_1)
         )
         # 统计每个环境满足traj_reward条件的次数
@@ -393,7 +385,7 @@ class RLGamesEnv:
 
         reward += traj_reward
 
-        self.reward_log[7] = traj_reward[0]
+        # self.reward_log[7] = traj_reward[0]
         # pos_error = pos_error_all.min(dim=1).values
         # 位置奖励：指数衰减
 
@@ -903,6 +895,9 @@ class RLGamesEnv:
         # 无人机之间最小间距（已在_check_done中计算）
         drone_to_drone_dist = self.min_drone_drone_dist[0].item() if hasattr(self, 'min_drone_drone_dist') else 0.0
         
+        # 获取第一个环境到轨迹的最小距离
+        min_pos_error_all = self.pos_error_all[0].min().item()
+        
         # 负载和绳子状态作为文本注释
         payload_state = self.payload.state[0]
         cable_tensions = self.cable.T[0]
@@ -922,7 +917,8 @@ class RLGamesEnv:
             f"Distance Info:\n"
             f"Payload-Obs: {payload_to_obs_dist:.3f}m\n"
             f"Drone-Obs(min): {drone_to_obs_dist:.3f}m\n"
-            f"Drone-Drone(min): {drone_to_drone_dist:.3f}m"
+            f"Drone-Drone(min): {drone_to_drone_dist:.3f}m\n"
+            f"Min Dist to Traj: {min_pos_error_all:.3f}m"
         )
         
         # 在图上添加状态文本，不使用图例
@@ -1058,6 +1054,9 @@ class RLGamesEnv:
                 drone_to_obs_dist_2d = 0.0
             drone_to_drone_dist_2d = self.min_drone_drone_dist[0].item() if hasattr(self, 'min_drone_drone_dist') else 0.0
             
+            # 获取第一个环境到轨迹的最小距离
+            min_pos_error_all_2d = self.pos_error_all[0].min().item()
+            
             state_text_2d = (
                 f"Actual Payload State:\n"
                 f"Pos: [{payload_state[0].item():.2f}, {payload_state[1].item():.2f}, {payload_state[2].item():.2f}]\n"
@@ -1073,7 +1072,8 @@ class RLGamesEnv:
                 f"Distance Info:\n"
                 f"Payload-Obs: {payload_to_obs_dist_2d:.3f}m\n"
                 f"Drone-Obs(min): {drone_to_obs_dist_2d:.3f}m\n"
-                f"Drone-Drone(min): {drone_to_drone_dist_2d:.3f}m"
+                f"Drone-Drone(min): {drone_to_drone_dist_2d:.3f}m\n"
+                f"Min Dist to Traj: {min_pos_error_all_2d:.3f}m"
             )
             
             # 在图上添加状态文本，放在右下角

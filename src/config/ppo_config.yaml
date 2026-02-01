@@ -58,9 +58,9 @@ params:
     normalize_advantage: True
 
     # === Parallelism & rollout ===
-    num_actors: 16
+    num_actors: 4096
     horizon_length: 128
-    minibatch_size: 32
+    minibatch_size: 1024
     mini_epochs: 5
     max_epochs: 100000
 
